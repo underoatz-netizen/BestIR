@@ -1,0 +1,7 @@
+dist/
+build/
+.test-tmp/
+__pycache__/
+.pytest_cache/
+.bestir_cache.json
+*.pyc
