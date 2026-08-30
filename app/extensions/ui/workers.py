@@ -70,6 +70,7 @@ class PairAnalysisWorker(QThread):
 
     def run(self):
         try:
+            from app.extensions.contracts import PairComparisonConfig
             from app.extensions.pair_compare import compare_pair, predict_blend
             if self._cancelled:
                 return
@@ -77,10 +78,11 @@ class PairAnalysisWorker(QThread):
             prep_b = self._service.prepared(self._b)
             if self._cancelled:
                 return
-            pair = compare_pair(prep_a, prep_b)
+            cfg = PairComparisonConfig()
+            pair = compare_pair(prep_a, prep_b, cfg)
             if self._cancelled:
                 return
-            blend = predict_blend(prep_a, prep_b, alignment='suggested')
+            blend = predict_blend(prep_a, prep_b, cfg, alignment='suggested')
             if self._cancelled:
                 return
             env_a = self._service.envelope(self._a)

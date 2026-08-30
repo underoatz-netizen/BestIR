@@ -141,3 +141,50 @@ def test_legacy_window_unchanged_at_rest(extended):
     assert extended.library_panel.model.rowCount() == min(25, len(extended.library))
     extended._clear_rank()
     assert extended.library_panel.model.rowCount() == len(extended.library)
+
+
+def test_workbench_export_flow_writes_files(extended, tmp_path, qapp):
+    """WP-08 UI path: pair done -> export aligned B / blend / report."""
+    extended.show_workbench()
+    wb = extended._workbench
+    recs = extended.library_panel.visible_records()
+    wb.set_pair(recs[0], recs[1])
+    from app.extensions.contracts import PairComparisonConfig
+    from app.extensions.pair_compare import compare_pair, predict_blend
+    pair = compare_pair(wb.service.prepared(recs[0]),
+                        wb.service.prepared(recs[1]), PairComparisonConfig())
+    blend = predict_blend(wb.service.prepared(recs[0]),
+                          wb.service.prepared(recs[1]), PairComparisonConfig(),
+                          alignment='suggested')
+    wb._pair_request_id = 7
+    wb._on_pair_done(7, {'pair': pair, 'blend': blend,
+                         'env_a': wb.service.envelope(recs[0]),
+                         'env_b': wb.service.envelope(recs[1])})
+    assert wb.phase_blend.btn_export_b.isEnabled()
+
+    out_dir = tmp_path / 'exported'
+    monkey_fx = QFileDialog_stub(out_dir)
+    from unittest.mock import patch
+    with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
+               return_value=str(out_dir)):
+        wb._export_aligned_b()
+        wb._export_blend()
+        wb._export_report()
+    files = sorted(p.name for p in out_dir.iterdir())
+    assert any('aligned' in f for f in files), files
+    assert any('pct B' in f for f in files), files
+    assert any(f.endswith('.json') for f in files), files
+    # sources untouched
+    assert recs[0].path and Path(recs[0].path).exists()
+
+
+class QFileDialog_stub:
+    """Context shim so the test above reads clearly."""
+    def __init__(self, out_dir):
+        self.out_dir = out_dir
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False

@@ -374,6 +374,37 @@ class ResponseFingerprint:
 
 
 @dataclass(frozen=True)
+class IRProcessingConfig:
+    """Non-destructive processing recipe (WP-08).
+
+    Populated ONLY after explicit user action from the suggested pair
+    alignment; analysis never modifies audio on its own.
+    """
+    version: str = ALGO_VERSION
+    delay_samples: float = 0.0    # advance B by this many samples (>0 = earlier)
+    polarity: int = 1             # +1 keep, -1 invert
+    normalize_peak_dbfs: float | None = None   # optional peak target, e.g. -1.0
+    output_subtype: str = 'PCM_24'
+    note: str = ''
+
+    def config_hash(self) -> str:
+        return config_hash(self)
+
+
+@dataclass(frozen=True)
+class ProcessingReport:
+    """Provenance of one exported file (plan section 11.6)."""
+    source_key: SourceKey
+    output_path: str
+    applied: dict = field(default_factory=dict)   # operation -> value (units in keys)
+    warnings: tuple = ()
+    algo_version: str = ALGO_VERSION
+
+    def to_json(self) -> str:
+        return deterministic_json(self)
+
+
+@dataclass(frozen=True)
 class ScoreComponent:
     name: str
     raw_value: float | None

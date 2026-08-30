@@ -24,19 +24,20 @@ def main() -> int:
     app.setApplicationName('BestIR Extended')
     QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
 
-    from app.ui.styles import BG, MODERN_QSS, TEXT
-    app.setStyleSheet(MODERN_QSS)
+    from app.extensions.ui.styles_boro import (BG_CANVAS, BORO_QSS,
+                                                SURFACE_CARD, TEXT_BODY)
+    app.setStyleSheet(BORO_QSS)
     pal = app.palette()
-    pal.setColor(QPalette.Window, QColor(BG))
-    pal.setColor(QPalette.WindowText, QColor(TEXT))
-    pal.setColor(QPalette.Base, QColor(BG))
-    pal.setColor(QPalette.Text, QColor(TEXT))
-    pal.setColor(QPalette.ToolTipBase, QColor(BG))
+    pal.setColor(QPalette.Window, QColor(BG_CANVAS))
+    pal.setColor(QPalette.WindowText, QColor(TEXT_BODY))
+    pal.setColor(QPalette.Base, QColor(SURFACE_CARD))
+    pal.setColor(QPalette.Text, QColor(TEXT_BODY))
+    pal.setColor(QPalette.ToolTipBase, QColor(BG_CANVAS))
     app.setPalette(pal)
 
     from app.extensions.ui.main_window_adapter import ExtendedMainWindow
     win = ExtendedMainWindow()
-    win.setWindowTitle('BestIR Extended — IR screener & compare')
+    win.setWindowTitle('BestIR Extended \u2014 IR screener & compare')
     win.show()
     return app.exec()
 

@@ -1,12 +1,18 @@
-"""Spectrogram comparison view: A, B and difference heatmaps (WP-07)."""
+"""Spectrogram comparison view: A, B and difference heatmaps (WP-07).
+
+Enhanced with Boro UI styling, color-coded panel headers, and symmetric difference scale.
+"""
 from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QVBoxLayout,
+                               QWidget)
 
-from app.ui.styles import SURFACE
+from .styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_DIFF, COLOR_IR_A,
+                          COLOR_IR_B, FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY,
+                          SURFACE_CARD, SURFACE_RAISED, TEXT_MAIN, TEXT_MUTED)
 
 _TICKS = [(20, '20'), (50, '50'), (100, '100'), (200, '200'), (500, '500'),
           (1000, '1k'), (2000, '2k'), (5000, '5k'), (10000, '10k'), (20000, '20k')]
@@ -45,8 +51,8 @@ def _heatmap(result, dyn):
 def _style(plot: pg.PlotWidget):
     ax = plot.getAxis('bottom')
     ax.setTicks([[(float(np.log10(v)), lbl) for v, lbl in _TICKS]])
-    plot.setLabel('bottom', 'Frequency (Hz)')
-    plot.setLabel('left', 'Time (ms)')
+    plot.setLabel('bottom', 'Frequency (Hz)', color=TEXT_MUTED)
+    plot.setLabel('left', 'Time (ms)', color=TEXT_MUTED)
     plot.invertY(True)
     plot.showGrid(x=False, y=False)
 
@@ -55,21 +61,60 @@ class SpectrogramView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plots = {}
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        for name, title in (('A', 'A'), ('B', 'B'), ('diff', 'A − B')):
-            col = QVBoxLayout()
-            col.addWidget(QLabel(title))
-            plot = pg.PlotWidget(background=SURFACE)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(6)
+
+        # 3 Panels Row
+        grid_row = QHBoxLayout()
+        grid_row.setSpacing(6)
+
+        configs = [
+            ('A', 'Spectrogram: IR A', COLOR_IR_A),
+            ('B', 'Spectrogram: IR B', COLOR_IR_B),
+            ('diff', 'Difference: A − B', COLOR_DIFF),
+        ]
+
+        for key, title, color in configs:
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {SURFACE_CARD};
+                    border: 1px solid {BORDER_CARD};
+                    border-radius: 8px;
+                }}
+            """)
+            c_lay = QVBoxLayout(card)
+            c_lay.setContentsMargins(6, 6, 6, 6)
+            c_lay.setSpacing(4)
+
+            hdr = QLabel(title)
+            hdr.setStyleSheet(f"color: {color}; font-weight: 600; font-size: 8.5pt;")
+            c_lay.addWidget(hdr, 0)
+
+            plot = pg.PlotWidget(background=SURFACE_CARD)
             _style(plot)
-            self._plots[name] = plot
-            col.addWidget(plot)
-            container = QWidget()
-            container.setLayout(col)
-            layout.addWidget(container, 1)
+            self._plots[key] = plot
+            c_lay.addWidget(plot, 1)
+
+            grid_row.addWidget(card, 1)
+
+        main_layout.addLayout(grid_row, 1)
+
+        # Metrics / Difference explanation label at bottom
         self._diff_label = QLabel('')
-        layout_of_self = self.layout()
-        layout_of_self.addWidget(self._diff_label)
+        self._diff_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {SURFACE_CARD};
+                border: 1px solid {BORDER_CARD};
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: {TEXT_MAIN};
+                font-family: {FONT_FAMILY_MONO};
+                font-size: 8pt;
+            }}
+        """)
+        main_layout.addWidget(self._diff_label, 0)
 
     def show_pair(self, spec_a, spec_b, dyn: float = 60.0):
         self._plots['A'].clear()
@@ -97,10 +142,10 @@ class SpectrogramView(QWidget):
                 img.setRect(x0, t0, (x1 - x0) * nf / (nf - 1) if nf > 1 else 1.0,
                             (t1 - t0) * nt / (nt - 1) if nt > 1 else 1.0)
                 img.setLookupTable(_lut())
-                img.setLevels((-15, 15))   # symmetric: positive = A brighter
+                img.setLevels((-15, 15))
                 self._plots['diff'].addItem(img)
-                text = ('Difference scale ±15 dB — bright: A has more energy '
-                        'there; dark: B has more.')
+                text = ('Difference scale +/-15 dB: Bright = IR A has more persistent energy, '
+                        'Dark = IR B has more.')
         self._diff_label.setText(text)
 
     def show_metrics(self, metrics_a: dict, metrics_b: dict):
@@ -111,4 +156,4 @@ class SpectrogramView(QWidget):
                     f"{m.get('persistence_excess_db'):.1f} dB, "
                     f"duration {m.get('persistence_duration_ms'):.0f} ms, "
                     f"ridge {m.get('persistence_ridge_hz'):.0f} Hz")
-        self._diff_label.setText(f'A: {line(metrics_a)}   |   B: {line(metrics_b)}')
+        self._diff_label.setText(f'IR A: {line(metrics_a)}   |   IR B: {line(metrics_b)}')

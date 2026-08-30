@@ -47,36 +47,46 @@ def main() -> int:
     assert 0 < n_ranked <= 25
     win._clear_rank()
 
-    # workbench: A/B populate + full pair pipeline (synchronous, no audio)
+    # workbench: A/B populate + the REAL worker pipeline (no audio needed)
     win.show_workbench()
     wb = win._workbench
     recs = win.library_panel.visible_records()
     wb.set_pair(recs[0], recs[1])
-    from app.extensions.contracts import PairComparisonConfig, TimeFrequencyConfig
-    from app.extensions.pair_compare import compare_pair, predict_blend
-    pair = compare_pair(wb.service.prepared(recs[0]),
-                        wb.service.prepared(recs[1]), PairComparisonConfig())
-    blend = predict_blend(wb.service.prepared(recs[0]),
-                          wb.service.prepared(recs[1]), PairComparisonConfig(),
-                          alignment='suggested')
-    result = {'pair': pair, 'blend': blend,
-              'env_a': wb.service.envelope(recs[0]),
-              'env_b': wb.service.envelope(recs[1])}
-    wb._pair_request_id = 1
-    wb._on_pair_done(1, result)
+
+    # run the debounce + the actual PairAnalysisWorker synchronously
+    wb._debounce.timeout.emit()
+    results = {}
+    from PySide6.QtCore import Qt
+    wb._pair_worker.finished_ok.connect(
+        lambda rid, res: results.__setitem__('pair_done', (rid, res)),
+        Qt.DirectConnection)
+    wb._pair_worker.failed.connect(
+        lambda rid, msg: results.__setitem__('pair_failed', (rid, msg)),
+        Qt.DirectConnection)
+    wb._pair_worker.run()          # synchronous execution of the real job
+    assert 'pair_done' in results, results.get('pair_failed')
+    rid, result = results['pair_done']
+    wb._pair_request_id = rid
+    wb._on_pair_done(rid, result)
     print(f"workbench: {wb.status.text()}")
     assert wb.summary.table.rowCount() > 0
+    assert wb.waveform._a.xData is not None and len(wb.waveform._a.xData) > 100
 
-    # heavy tabs via the direct spec cache path
-    tf = TimeFrequencyConfig(profile='balanced')
-    from app.extensions.csd import compute_csd
-    from app.extensions.spectrogram import compute_spectrogram
-    wb._apply_spec('csd_a', compute_csd(wb.service.prepared(recs[0]), tf))
-    wb._apply_spec('csd_b', compute_csd(wb.service.prepared(recs[1]), tf))
-    wb._apply_spec('spec_a',
-                   compute_spectrogram(wb.service.prepared(recs[0]), tf))
-    wb._apply_spec('spec_b',
-                   compute_spectrogram(wb.service.prepared(recs[1]), tf))
+    # heavy tabs through the REAL AnalysisWorker jobs
+    wb.tabs.setCurrentIndex(wb.tabs.indexOf(wb.tabs.widget(2)))   # CSD tab
+    for key in ('csd_a', 'csd_b'):
+        worker = wb._spec_workers.get(key)
+        assert worker is not None, f'no worker for {key}'
+        sink = {}
+        worker.finished_ok.connect(lambda rid, res: sink.__setitem__('ok', res),
+                                   Qt.DirectConnection)
+        worker.failed.connect(lambda rid, m: sink.__setitem__('err', m),
+                              Qt.DirectConnection)
+        worker.run()
+        assert 'ok' in sink, sink.get('err')
+        wb._on_spec_done(key, worker.request_id, sink['ok'])
+    assert wb.csd._decay_text.toPlainText(), 'band decay readout empty'
+
     for i in range(wb.tabs.count()):
         wb.tabs.setCurrentIndex(i)
         app.processEvents()
