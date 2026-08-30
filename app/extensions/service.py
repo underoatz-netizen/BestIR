@@ -23,7 +23,7 @@ from .contracts import (ALGO_VERSION, AnalysisStatus, AudioBuffer,
                         EnvelopeConfig, EnvelopeResult, PairComparisonConfig,
                         PairComparisonResult, PhaseConfig, PhaseResult,
                         PreparedIR, PreprocessingConfig, ResponseFingerprint,
-                        SpectrogramResult, TimeFrequencyConfig)
+                        SourceKey, SpectrogramResult, TimeFrequencyConfig)
 
 _UNPROCESSED = (AnalysisStatus.SILENT, AnalysisStatus.NONFINITE,
                 AnalysisStatus.TOO_SHORT, AnalysisStatus.UNREADABLE)
@@ -70,14 +70,25 @@ class ResponseService:
 
     def fingerprint(self, record: AnalysisResult, force: bool = False
                     ) -> ResponseFingerprint:
+        from .contracts import SourceKey
         from .fingerprint import CFG_HASH, compute_fingerprint
+        signature = self._signature_for(record)
         if not force:
-            cached = self.cache.get(record.path, CFG_HASH)
+            cached = self.cache.get(signature, CFG_HASH)
             if cached is not None:
                 return cached
         fp = compute_fingerprint(record, self)
         self.cache.put(fp, CFG_HASH)
         return fp
+
+    def _signature_for(self, record: AnalysisResult) -> str:
+        """Cache signature without loading audio (same formula as SourceKey)."""
+        stat = os.stat(record.path)
+        key = SourceKey(path=os.path.abspath(record.path),
+                        mtime_ns=stat.st_mtime_ns, size=stat.st_size,
+                        sample_rate=record.sample_rate,
+                        channels=record.channels)
+        return key.signature()
 
     # ---- tier 2 ------------------------------------------------------------
     def csd(self, record: AnalysisResult, cfg=None) -> CSDResult:

@@ -84,3 +84,16 @@ tests/      unit tests + offscreen GUI smoke test (ครอบ DI/tone-match wo
 ```
 
 Cache: `%LOCALAPPDATA%\BestIR\cache.json` (ตรวจจาก mtime+size — แก้ไฟล์ IR แล้วจะถูกวิเคราะห์ใหม่เอง)
+
+## Extended build — เทียบ A/B และค้นหาด้วย response (สำหรับสายละเอียด)
+
+`BestIRExtended.exe` (build ด้วย `python -m PyInstaller BestIRExtended.spec`) คือเวอร์ชันขยายที่ **ไม่แตะฟีเจอร์เดิมแม้แต่บรรทัดเดียว** แต่เพิ่ม:
+
+- **Compare A/B** — เลือก 2 แถวในตาราง (หรือกด Set A/Set B) เพื่อเทียบ IR ที่โทนใกล้กันแบบละเอียด:
+  - **Waveform**: onset/peak envelope, บอก polarity และ rise time (พร้อมเงื่อนไขความถูกต้อง)
+  - **CSD waterfall**: cumulative spectral decay แบบ heatmap + ตัวเลข band-decay (D10/D20/D30) — แยก low-end resonance ที่โทนเหมือนกันแต่ตัวดับต่างกัน
+  - **Spectrogram**: A / B / A−B พร้อม persistence score (boxiness/bloom/fizz แบบตัวเลข ไม่ใช่แค่ภาพ)
+  - **Phase & Blend**: phase/group delay เฉพาะ bin ที่เชื่อถือได้, เสนอ delay/polarity สำหรับ blend, **ทำนาย EQ ของ A+B** ที่ตรวจยืนยันกับ convolution จริง (±0.25 dB) พร้อมความเสี่ยง comb cancellation
+- **Response Search** — จัดอันดับรอบสองจาก shortlist ของโทน: Tight / Fast attack / Low boxiness / Smooth GD / Blend-safe พร้อม **คำอธิบายว่าทำไมแต่ละตัวได้อันดับนั้น** (score breakdown)
+
+สถาปัตยกรรมเป็น additive extension (Tier 0 เดิม / Tier 1 fingerprint cache / Tier 2 on-demand matrices) — รายละเอียดใน `docs/IR_COMPARISON_AND_MATCHING_PLAN_V2.md` และ QA ใน `docs/WP09_QA.md`
