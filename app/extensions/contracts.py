@@ -327,6 +327,7 @@ class DecayResult:
     band_decay_ms: dict = field(default_factory=dict)  # band -> ms to targets
     t20_ms: float | None = None
     t30_ms: float | None = None
+    t60_estimate_ms: float | None = None   # Schroeder fit extrapolated to -60 dB
     t60_valid: bool = False
     t60_reason: str = 'not a valid reverberation measurement'
 
