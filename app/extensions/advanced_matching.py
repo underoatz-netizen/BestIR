@@ -158,12 +158,12 @@ def rank_by_response(records: list[AnalysisResult], fingerprints: dict[str, Resp
     eligible = [c for c in candidates if not c.excluded]
     eligible.sort(key=lambda c: c.breakdown.total)
     others = [c for c in candidates if c.excluded]
-    for i, c in enumerate(eligible):
-        candidates[candidates.index(c)] = RankedCandidate(
-            record=c.record, fingerprint=c.fingerprint, breakdown=c.breakdown,
-            rank=i + 1, excluded=False, reason=c.reason)
-    out = eligible + others
-    return out
+    ranked_eligible = [
+        RankedCandidate(record=c.record, fingerprint=c.fingerprint,
+                        breakdown=c.breakdown, rank=i + 1, excluded=False,
+                        reason=c.reason)
+        for i, c in enumerate(eligible)]
+    return ranked_eligible + others
 
 
 def pair_search(records: list[AnalysisResult], anchor: AnalysisResult,
@@ -208,12 +208,16 @@ def pair_search(records: list[AnalysisResult], anchor: AnalysisResult,
             excluded=not valid,
             reason='' if valid else 'blend prediction had no valid bins'))
     out.sort(key=lambda c: (c.excluded, c.breakdown.total if c.breakdown else 9e9))
+    ranked = []
     for i, c in enumerate(out):
         if not c.excluded:
-            out[i] = RankedCandidate(record=c.record, fingerprint=c.fingerprint,
-                                     breakdown=c.breakdown, rank=i + 1,
-                                     excluded=False, reason=c.reason)
-    return out[:top_k]
+            ranked.append(RankedCandidate(record=c.record,
+                                          fingerprint=c.fingerprint,
+                                          breakdown=c.breakdown, rank=i + 1,
+                                          excluded=False, reason=c.reason))
+        else:
+            ranked.append(c)
+    return ranked[:top_k]
 
 
 class ResponseServiceLike:

@@ -137,7 +137,8 @@ def predict_blend(a: PreparedIR, b: PreparedIR, cfg: PairComparisonConfig,
 
     # verification against an actual aligned time-domain sum
     verified = _verify_against_time_domain(xa, xb, tau, s, ratios[mid_i],
-                                           freqs, mix_db[mid_i], reliable, sr)
+                                           freqs, mix_db[mid_i], reliable, sr,
+                                           nfft)
 
     warnings = []
     if worst_dev is not None and worst_dev > 12.0:
@@ -260,14 +261,12 @@ def _phase_diff_weighted(HA: np.ndarray, HB: np.ndarray,
 def _verify_against_time_domain(xa: np.ndarray, xb: np.ndarray, tau: float,
                                 s: int, ratio: float, freqs: np.ndarray,
                                 predicted_db: np.ndarray, reliable: np.ndarray,
-                                sr: int) -> float | None:
+                                sr: int, nfft: int) -> float | None:
     if not reliable.any():
         return None
-    nfft = len(predicted_db) * 2 - 2 if len(predicted_db) > 1 else 4096
-    nfft = next_pow2(max(len(xa), len(xb) + int(abs(tau)) + 8) * 2)
     HA = np.fft.rfft(xa, nfft)
     HB = np.fft.rfft(xb, nfft)
     mix = HA + ratio * s * HB * np.exp(-2j * np.pi * freqs * tau / sr)
     ref_db = 20 * np.log10(np.maximum(np.abs(mix), 1e-30))
-    return float(np.sqrt(np.mean((predicted_db[:len(ref_db)][reliable] -
+    return float(np.sqrt(np.mean((predicted_db[reliable] -
                                   ref_db[reliable]) ** 2)))

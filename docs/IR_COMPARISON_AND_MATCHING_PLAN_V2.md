@@ -503,7 +503,136 @@ Interaction requirements:
 - Result request IDs prevent an old computation from updating a newer pair.
 - All failure/invalid states remain visible instead of leaving stale graphs.
 
-## 11. Additional High-Value Features
+## 11. UX/UI Reference Handoff — Boro UI for Apple Watch Apps
+
+Reference supplied by the owner:
+
+<https://www.figma.com/design/Zxfefb7M5L9xKTvihi85pz/Boro-UI-for-Apple-Watch-apps--Community-?node-id=0-1&t=5EKqt79eq0FYN36q-1>
+
+The reference is a visual and interaction direction, not a pixel-copy target.
+Publicly indexed descriptions characterize the kit as a clean, modern, dark,
+futuristic Apple Watch UI with neumorphic/skeuomorphic depth and yellow accents.
+The exact Figma file was not programmatically readable in this environment, so
+exact dimensions, token names, and component IDs must be confirmed by the UI
+agent if Figma access becomes available.
+
+### What to Carry into BestIR
+
+| Reference language | BestIR adaptation | Do not do |
+|---|---|---|
+| Dark layered surfaces | Keep the current `BG`, `SURFACE`, `SURFACE2`, and `BORDER` tokens; add a shallow raised-card hierarchy for the extension | Do not recolor the accepted legacy UI globally |
+| Strong accent color | Use a gold/yellow accent for target/attention and distinct blue/green A/B plot colors | Do not use one neon color for every data series |
+| Compact cards and status chips | Use metric cards, validity chips, and compact control rows in the Compare Workbench | Do not hide units or warnings behind icon-only controls |
+| Tactile depth/shadows | Use subtle shadows and 1–2 px contrast edges on navigation/control cards | Do not add heavy shadows to heatmaps, axes, or scientific plots |
+| Watch-like focused flows | Keep one primary action per state: `Compare`, `Align`, `Blend`, or `Export` | Do not force desktop users through a watch-style multi-screen wizard |
+| High glanceability | Put A/B identity, tone score, validity, and key response deltas above plots | Do not replace detailed plots with decorative gauges |
+
+### Desktop Shell Mapping
+
+The current BestIR layout already has a useful three-region structure:
+
+```text
+Left: Library/table and filters
+Center: Plot/workbench and analysis tabs
+Right: Inspector, pair summary, and actions
+```
+
+The extension should preserve that structure. `ExtendedMainWindow(MainWindow)`
+adds a compact context header above the workbench:
+
+```text
+[BestIR] [A: filename / tone score] [B: filename / tone score]
+[Compare] [Align] [Raw | Onset aligned | Blend aligned] [Export report]
+```
+
+### Design Tokens for the Extension
+
+Use existing `app/ui/styles.py` values as the compatibility baseline. Define
+extension-only aliases rather than editing legacy tokens:
+
+| Token | Initial direction | Usage |
+|---|---|---|
+| `compare-bg` | existing `BG` | Workbench background |
+| `compare-surface` | existing `SURFACE` | Cards, controls, plot containers |
+| `compare-surface-raised` | existing `SURFACE2` | Selected/raised card |
+| `compare-text` | existing `TEXT` | Primary labels and values |
+| `compare-text-dim` | existing `TEXT_DIM` | Units, secondary labels |
+| `compare-target` | warm gold/yellow | Target, attention, blend ratio |
+| `compare-a` | high-contrast blue | IR A and its markers |
+| `compare-b` | high-contrast green | IR B and its markers |
+| `compare-difference` | orange/red with symmetric scale | A-minus-B and risk warnings |
+| `compare-valid` | existing `GREEN` | Valid/verified metric |
+| `compare-invalid` | existing `RED` | Invalid/insufficient-data metric |
+
+The final colors must be checked for contrast against the dark surfaces and
+tested with color-vision simulation. Series identity must also be communicated
+by labels, line styles, or markers—not color alone.
+
+### Component and State Handoff
+
+| Component | Required states | Behavior |
+|---|---|---|
+| `PairHeader` | empty, A-only, A+B, stale, loading | Shows source names, sample rates, channel policy, and request status |
+| `MetricCard` | valid, warning, invalid, unavailable | Shows value, unit, confidence, and a short reason; never displays a bare `0` for missing data |
+| `AnalysisTabBar` | default, active, disabled/loading | Tabs are Waveform, CSD, Spectrogram, Phase & Blend; disabled tabs explain why |
+| `ViewToolbar` | raw, onset-aligned, blend-aligned | Controls shared display normalization, frequency range, dynamic range, and resolution profile |
+| `PlotLegend` | A, B, difference, target | Labels remain visible while zooming and exporting |
+| `ValidityChip` | valid, low-confidence, truncated, noise-dominated, invalid | Tooltip explains the acoustic limitation |
+| `BlendControls` | no pair, pair available, alignment suggested, risky | Ratio/delay/polarity changes update prediction with debounce and cancellation |
+| `ResponseSearchPanel` | legacy-only, fingerprint loading, ready, no valid candidates | Keeps tone constraints visible while showing response weights |
+| `ExportReportDialog` | preview, writing, success, collision, error | Requires destination confirmation and reports exact source/config/signature |
+
+### Interaction and Accessibility
+
+- Keyboard order: library selection → pair assignment → toolbar → tab bar →
+  plot controls → metric cards → export.
+- All icon buttons have text/tooltips and accessible names.
+- A/B assignment supports keyboard shortcuts and a visible swap action.
+- Hover crosshair is supplemented by keyboard-selectable frequency/time values.
+- Loading uses a non-blocking progress state; invalid data uses explanatory text.
+- Long filenames are elided visually but available in a tooltip and report.
+- Color, line pattern, labels, and marker shape jointly identify A/B/difference.
+- Plot zoom/pan must not remove the legend, units, or validity indicator.
+- Motion is restrained: 120–180 ms ease-out for card/tab state changes; no
+  animated plot interpolation that implies unmeasured data.
+
+### Responsive Behavior
+
+Although the reference is watch-sized, BestIR is a desktop tool. Use these
+desktop breakpoints for the extension:
+
+| Width | Behavior |
+|---|---|
+| `>= 1280 px` | Three-region shell; summary cards and plot side by side where space permits |
+| `900–1279 px` | Keep library and workbench; collapse right inspector into a tab/drawer |
+| `< 900 px` | Single active region with A/B summary pinned above; never shrink plots below readable axis labels |
+
+### Loading, Empty, and Error UX
+
+- No pair: explain “Select two IRs to compare” and show the legacy tone workflow.
+- A-only: allow assigning B from the library without clearing A.
+- Different sample rates: show both native rates and the explicit comparison rate.
+- Noisy/short IR: render the waveform but mark unsupported metrics as invalid.
+- OpenGL unavailable: show the CSD fallback and a non-blocking capability note.
+- Worker cancelled: restore the previous complete result, never a half-rendered mix.
+- Cache failure: show a recoverable warning and recompute in memory.
+- Export collision: offer a new collision-safe filename; never overwrite silently.
+
+### UX Acceptance Gate
+
+The UI agent must provide a static screenshot or offscreen render for:
+
+1. Empty pair.
+2. Two valid IRs with all tabs ready.
+3. Valid A + invalid/truncated B.
+4. Loading/cancelled response analysis.
+5. Blend with a visible comb-risk warning.
+
+Review criteria are glanceability, readable scientific units, clear A/B identity,
+visible validity, keyboard navigation, dark-theme contrast, and no decorative
+element obscuring data. Exact Figma measurements remain pending direct access.
+
+## 12. Additional High-Value Features
 
 These additions directly improve selection accuracy and should be included
 after the four required views are numerically stable:
@@ -522,7 +651,7 @@ after the four required views are numerically stable:
 6. **Measurement provenance:** export a JSON/CSV report containing configs,
    units, warnings, source signatures, and score breakdowns.
 
-## 12. Work Packages and Efficient Dependency Order
+## 13. Work Packages and Efficient Dependency Order
 
 ```text
 WP-00 Baseline + recoverable snapshot
@@ -711,7 +840,7 @@ modifies audio automatically.
   packaged launch, and listening A/B checks.
 - Switch the default launcher only in a separately approved final change.
 
-## 13. Test Fixtures
+## 14. Test Fixtures
 
 Create deterministic synthetic fixtures rather than relying only on commercial
 IR files:
@@ -727,7 +856,7 @@ IR files:
 Use real IRs only for integration, visual review, and performance evidence. Unit
 tests must not depend on the licensed `IR/` library being present.
 
-## 14. Test Gates
+## 15. Test Gates
 
 For every work package:
 
@@ -741,7 +870,7 @@ WP-07 and WP-09 also run legacy and extended offscreen GUI smoke tests. Each
 agent reports exact commands, results, numerical tolerances, unresolved risks,
 and files changed.
 
-## 15. AI Coder Handoff Prompt
+## 16. AI Coder Handoff Prompt
 
 Give one agent one work package. WP-03 and WP-04 are the first safe parallel
 pair. Use this prompt:
@@ -768,7 +897,7 @@ Coordinator rules:
 - WP-07 consumes frozen result models; it does not embed DSP in widgets.
 - One coordinator runs the combined suite and handles cross-package changes.
 
-## 16. Completion Definition
+## 17. Completion Definition
 
 The clarified project is complete only when:
 
@@ -785,4 +914,3 @@ The clarified project is complete only when:
 - Legacy tests, extended tests, both GUI smoke paths, packaging, real-IR review,
   and listening A/B checks pass.
 - Source files, legacy cache/data models, and legacy executable remain intact.
-
