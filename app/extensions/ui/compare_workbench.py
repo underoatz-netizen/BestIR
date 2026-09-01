@@ -76,6 +76,8 @@ class CompareWorkbench(QDialog):
         self._pair_request_id: int | None = None
         self._last_pair = None
         self._last_blend = None
+        self._last_fp_a = None
+        self._last_fp_b = None
         self._spec_workers = {}
         self._retired_workers = []
         self._spec_cache = {}
@@ -103,6 +105,13 @@ class CompareWorkbench(QDialog):
         self.spectrogram = SpectrogramView()
         self.phase_blend = PhaseBlendView()
         self.phase_blend.set_export_enabled(False)
+        # B05: route the view's export actions into the guarded workbench
+        # handlers. Eligibility starts disabled; _invalidate() revokes it on
+        # every selection change and _on_pair_done() restores it only for a
+        # current, fully OK pair/blend result.
+        self.phase_blend.export_aligned_b.connect(self._export_aligned_b)
+        self.phase_blend.export_blend.connect(self._export_blend)
+        self.phase_blend.export_report.connect(self._export_report)
         self.search = ResponseSearchPanel(self)
         self.search.rank_requested.connect(self._run_response_search)
 
@@ -310,6 +319,8 @@ class CompareWorkbench(QDialog):
 
         self._last_pair = None
         self._last_blend = None
+        self._last_fp_a = None
+        self._last_fp_b = None
         self._spec_cache.clear()
         self._csd_results.clear()
         self._spec_results.clear()
@@ -365,14 +376,18 @@ class CompareWorkbench(QDialog):
         self._last_pair = pair
         self._last_blend = blend
         env_a, env_b = result['env_a'], result['env_b']
+        # B17: fingerprint/phase arrive ready from the worker bundle; the
+        # callback only renders — no service DSP runs on the GUI thread.
+        self._last_fp_a = result.get('fp_a')
+        self._last_fp_b = result.get('fp_b')
         self.waveform.show_envelopes(env_a, env_b)
         self.waveform.mark_onset_peak(env_a, COLOR_IR_A, 'A')
         self.waveform.mark_onset_peak(env_b, COLOR_IR_B, 'B')
         self.summary.show_fingerprints(
-            self._fingerprint(self.rec_a), self._fingerprint(self.rec_b),
+            self._last_fp_a, self._last_fp_b,
             _short(self.rec_a.path), _short(self.rec_b.path))
-        self.phase_blend.show_pair(self._phase(self.rec_a),
-                                   self._phase(self.rec_b), pair)
+        self.phase_blend.show_pair(result.get('phase_a'),
+                                   result.get('phase_b'), pair)
         self.phase_blend.show_blend(pair, blend)
         self.status.setText(f"Pair: delay {pair.delay_ms:+.2f} ms "
                             f"({pair.delay_samples:+.2f} samples), "
@@ -393,18 +408,6 @@ class CompareWorkbench(QDialog):
             return
         self.phase_blend.set_export_enabled(False)
         self.status.setText(f'Pair analysis failed: {msg}')
-
-    def _fingerprint(self, rec):
-        try:
-            return self.service.fingerprint(rec)
-        except Exception:
-            return None
-
-    def _phase(self, rec):
-        try:
-            return self.service.phase(rec)
-        except Exception:
-            return None
 
     # ---- tab-driven heavy views ---------------------------------------------------
     def _on_tab_changed(self, idx: int):
@@ -541,10 +544,33 @@ class CompareWorkbench(QDialog):
                     self._spec_a.metrics, self._spec_b.metrics)
 
     # ---- WP-08: non-destructive export ----------------------------------------------
+    def _export_ready(self) -> bool:
+        """B05 gate: exports require a current, fully valid pair/blend result.
+
+        True only while the stored results belong to the active selection
+        context (same A/B identity, config hash and generation) and both
+        analyses completed cleanly.  Cleared immediately by ``_invalidate()``
+        on any selection change, so stale results can never reach an export.
+        """
+        context = self._selection_context
+        pair, blend = self._last_pair, self._last_blend
+        if (context is None or pair is None or blend is None or
+                self.rec_a is None or self.rec_b is None):
+            return False
+        if (getattr(pair, 'status', None) != AnalysisStatus.OK or
+                getattr(blend, 'status', None) != AnalysisStatus.OK):
+            return False
+        return self._pair_results_match_context(pair, blend, context)
+
     def _export_pair(self):
+        """Shared precondition + directory picker; None means do not export."""
         from PySide6.QtWidgets import QFileDialog
         if self.rec_a is None or self.rec_b is None:
             self.status.setText('Assign both A and B first.')
+            return None
+        if not self._export_ready():
+            self.status.setText('Export unavailable: run the pair analysis '
+                                'first — results are invalid or stale.')
             return None
         dest = QFileDialog.getExistingDirectory(self, 'Export processed IRs to…')
         return dest or None
@@ -556,15 +582,16 @@ class CompareWorkbench(QDialog):
         from app.extensions.contracts import IRProcessingConfig
         from app.extensions.processing_export import export_pair_aligned_b
         pair = self._last_pair
-        if pair is None:
-            self.status.setText('Run the pair analysis first.')
-            return
         cfg = IRProcessingConfig(normalize_peak_dbfs=-1.0,
                                  note='suggested alignment from Compare A/B')
-        prep_a = self.service.prepared(self.rec_a)
-        prep_b = self.service.prepared(self.rec_b)
-        report = export_pair_aligned_b(prep_a, prep_b, pair, dest, cfg=cfg,
-                                       suffix='aligned')
+        try:
+            prep_a = self.service.prepared(self.rec_a)
+            prep_b = self.service.prepared(self.rec_b)
+            report = export_pair_aligned_b(prep_a, prep_b, pair, dest, cfg=cfg,
+                                           suffix='aligned')
+        except Exception as exc:   # B05: surface I/O/analysis failures in UI
+            self.status.setText(f'Aligned-B export failed: {exc}')
+            return
         self.status.setText(f"Exported {report.output_path.rsplit(chr(92), 1)[-1]} "
                             f"(delay {pair.delay_samples:+.2f} samples, polarity "
                             f"{pair.polarity:+d})")
@@ -573,16 +600,16 @@ class CompareWorkbench(QDialog):
         dest = self._export_pair()
         if not dest:
             return
-        from app.extensions.contracts import PairComparisonConfig
         from app.extensions.processing_export import export_blend
         pair = self._last_pair
-        if pair is None:
-            self.status.setText('Run the pair analysis first.')
-            return
         ratio = self.phase_blend.current_ratio_b()
-        prep_a = self.service.prepared(self.rec_a)
-        prep_b = self.service.prepared(self.rec_b)
-        report = export_blend(prep_a, prep_b, pair, ratio, dest)
+        try:
+            prep_a = self.service.prepared(self.rec_a)
+            prep_b = self.service.prepared(self.rec_b)
+            report = export_blend(prep_a, prep_b, pair, ratio, dest)
+        except Exception as exc:   # B05: surface I/O/analysis failures in UI
+            self.status.setText(f'Blend export failed: {exc}')
+            return
         self.status.setText(f"Exported blend → "
                             f"{report.output_path.rsplit(chr(92), 1)[-1]}")
 
@@ -593,14 +620,15 @@ class CompareWorkbench(QDialog):
         from app.extensions.processing_export import export_pair_report
         pair = self._last_pair
         blend = self._last_blend
-        if pair is None:
-            self.status.setText('Run the pair analysis first.')
+        try:
+            report = export_pair_report(
+                pair, blend,
+                self._last_fp_a, self._last_fp_b,
+                dest, name=f"pair_report_{_short(self.rec_a.path)}_vs_"
+                           f"{_short(self.rec_b.path)}.json")
+        except Exception as exc:   # B05: surface I/O failures in UI
+            self.status.setText(f'Report export failed: {exc}')
             return
-        report = export_pair_report(
-            pair, blend,
-            self._fingerprint(self.rec_a), self._fingerprint(self.rec_b),
-            dest, name=f"pair_report_{_short(self.rec_a.path)}_vs_"
-                       f"{_short(self.rec_b.path)}.json")
         self.status.setText(f"Exported report → {report.output_path}")
 
     # ---- response search ------------------------------------------------------------
@@ -622,6 +650,7 @@ class CompareWorkbench(QDialog):
             return rank_by_response(records, fps, self.service, target,
                                     weights=request['weights'],
                                     constraints=request['constraints'],
+                                    targets=request.get('targets'),  # B08
                                     policy=request['policy'])
 
         self.status.setText('Response search: fingerprinting shortlist…')

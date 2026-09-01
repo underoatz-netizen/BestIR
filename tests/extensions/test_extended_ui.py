@@ -478,6 +478,231 @@ def test_opengl_absence_falls_back():
     view.show_csd(res, 'A')   # must not raise on any renderer path
 
 
+def _pump_until(qapp, predicate, timeout_ms=20000):
+    """Spin the real Qt event loop (debounce timers + worker threads) until
+    predicate() holds. Returns the final predicate value."""
+    import time
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    qapp.processEvents()
+    return bool(predicate())
+
+
+def _click_through_event_loop(qapp, button):
+    """Deliver a real button click via the Qt event loop (queued invocation),
+    never by calling workbench handlers directly."""
+    QTimer.singleShot(0, button.click)
+    qapp.processEvents()
+
+
+def _export_buttons(view):
+    return (view.btn_export_b, view.btn_export_blend, view.btn_export_report)
+
+
+def test_b17_pair_callback_renders_worker_results_only(extended, qapp):
+    """B17 gate: fingerprint/phase/preparation run inside PairAnalysisWorker;
+    the GUI pair callback only renders the worker-provided bundle."""
+    import threading
+    from unittest.mock import patch
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    main_tid = threading.get_ident()
+    calls = {'fingerprint': [], 'phase': [], 'prepared': []}
+    real_fp = wb.service.fingerprint
+    real_phase = wb.service.phase
+    real_prepared = wb.service.prepared
+
+    def spy_fingerprint(record, force=False):
+        calls['fingerprint'].append(threading.get_ident())
+        return real_fp(record, force=force)
+
+    def spy_phase(record, cfg=None):
+        calls['phase'].append(threading.get_ident())
+        return real_phase(record, cfg=cfg)
+
+    def spy_prepared(record):
+        calls['prepared'].append(threading.get_ident())
+        return real_prepared(record)
+
+    try:
+        with patch.object(wb.service, 'fingerprint', spy_fingerprint), \
+                patch.object(wb.service, 'phase', spy_phase), \
+                patch.object(wb.service, 'prepared', spy_prepared):
+            wb.set_pair(a, b)
+            # real event loop: 250 ms debounce -> PairAnalysisWorker thread ->
+            # queued finished_ok -> _on_pair_done (render only)
+            assert _pump_until(
+                qapp,
+                lambda: wb._last_pair is not None
+                        and wb.summary.table.rowCount() > 0), \
+                'real pair pipeline never delivered a worker bundle'
+
+        assert calls['fingerprint'], 'worker never computed fingerprints'
+        assert calls['phase'], 'worker never computed phase'
+        # heavyweight service work happened exclusively off the GUI thread
+        assert all(tid != main_tid for tid in calls['fingerprint']), \
+            f'fingerprint ran on GUI thread: {calls["fingerprint"]}'
+        assert all(tid != main_tid for tid in calls['phase']), \
+            f'phase ran on GUI thread: {calls["phase"]}'
+        assert all(tid != main_tid for tid in calls['prepared']), \
+            f'prepared ran on GUI thread: {calls["prepared"]}'
+        # the GUI callback rendered the worker-provided results
+        assert wb._last_pair is not None
+        assert wb._last_fp_a is not None and wb._last_fp_b is not None
+        assert wb.summary.table.rowCount() > 0
+        assert wb.phase_blend._cache_a is not None
+        assert wb.phase_blend._cache_b is not None
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b05_export_buttons_open_dialog_once_when_valid(extended, qapp,
+                                                        tmp_path):
+    """B05 gate: after the real worker pipeline completes, each export button
+    click opens the directory dialog exactly once and writes a new output."""
+    import hashlib
+    from unittest.mock import Mock, patch
+    import soundfile as sf
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    src_digests = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                   for p in (a.path, b.path)}
+    try:
+        wb.set_pair(a, b)
+        # real pipeline: 250 ms debounce -> PairAnalysisWorker thread ->
+        # queued finished_ok -> _on_pair_done enables exports
+        assert _pump_until(qapp, lambda: wb.phase_blend.btn_export_b.isEnabled()), \
+            'exports never became enabled for a fresh valid pair'
+
+        out_dir = tmp_path / 'b05_export'
+        out_dir.mkdir()
+        dialog = Mock(return_value=str(out_dir))
+        with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
+                   new=dialog):
+            for idx, button in enumerate(_export_buttons(wb.phase_blend)):
+                _click_through_event_loop(qapp, button)
+                assert dialog.call_count == idx + 1, \
+                    f'{button.text()} did not trigger the dialog exactly once'
+                assert dialog.call_args_list[idx][0][0] is wb  # raised by workbench
+
+        names = sorted(p.name for p in out_dir.iterdir())
+        assert sum('aligned' in n for n in names) == 1, names
+        assert sum('pct B' in n for n in names) == 1, names
+        assert sum(n.endswith('.json') for n in names) == 1, names
+        # reopen every artifact (gate: new output is readable)
+        for name in names:
+            p = out_dir / name
+            if name.endswith('.json'):
+                assert '"pair"' in p.read_text(encoding='utf-8')
+            else:
+                data, sr = sf.read(str(p))
+                assert sr > 0 and len(data) > 0
+
+        # cancel path: dialog dismissed -> no handler work, no new files
+        with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
+                   new=Mock(return_value='')):
+            _click_through_event_loop(qapp, wb.phase_blend.btn_export_b)
+        assert sorted(p.name for p in out_dir.iterdir()) == names
+
+        # sources untouched by the whole flow
+        for p, digest in src_digests.items():
+            assert hashlib.sha256(Path(p).read_bytes()).hexdigest() == digest
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b05_export_blocked_when_pair_missing_or_pending(extended, qapp,
+                                                         tmp_path):
+    """B05 gate: initial/analyzing/invalid states must not reach a dialog —
+    neither through real clicks nor through a direct signal emission."""
+    from unittest.mock import Mock, patch
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    out_dir = tmp_path / 'b05_blocked'   # deliberately not created
+    dialog = Mock(return_value=str(out_dir))
+    try:
+        assert _export_buttons_enabled(wb) == (False, False, False)
+        with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
+                   new=dialog):
+            for button in _export_buttons(wb.phase_blend):
+                _click_through_event_loop(qapp, button)
+            # a single-slot selection has no pair: clicks and even a
+            # programmatic emit must be refused by the handler guard
+            wb.set_a(a)
+            for button in _export_buttons(wb.phase_blend):
+                _click_through_event_loop(qapp, button)
+                button.click()
+            for signal in (wb.phase_blend.export_aligned_b,
+                           wb.phase_blend.export_blend,
+                           wb.phase_blend.export_report):
+                signal.emit()
+            assert dialog.call_count == 0
+
+            # waiting state: pair chosen but debounce/worker still pending
+            wb.set_pair(a, b)
+            assert _export_buttons_enabled(wb) == (False, False, False)
+            for button in _export_buttons(wb.phase_blend):
+                _click_through_event_loop(qapp, button)
+            assert dialog.call_count == 0
+            assert wb._export_ready() is False
+        assert not out_dir.exists()
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b05_export_blocked_once_pair_becomes_stale(extended, qapp, tmp_path):
+    """B05 gate: changing B right after a completed A/B export revokes the
+    buttons instantly; stale clicks and stale emits open no dialog."""
+    from unittest.mock import Mock, patch
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b, c = extended.library_panel.visible_records()
+    out_dir = tmp_path / 'b05_stale'
+    out_dir.mkdir()
+    dialog = Mock(return_value=str(out_dir))
+    try:
+        wb.set_pair(a, b)
+        assert _pump_until(qapp, lambda: wb.phase_blend.btn_export_b.isEnabled())
+        with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
+                   new=dialog):
+            _click_through_event_loop(qapp, wb.phase_blend.btn_export_b)
+            assert dialog.call_count == 1
+            assert any(p.name for p in out_dir.iterdir())
+            written = set(out_dir.iterdir())
+
+            # B changes to C: invalidation is synchronous — before the new
+            # pair result exists, nothing may export
+            wb.set_b(c)
+            assert wb._export_ready() is False
+            assert _export_buttons_enabled(wb) == (False, False, False)
+            for button in _export_buttons(wb.phase_blend):
+                _click_through_event_loop(qapp, button)
+                assert dialog.call_count == 1
+            for signal in (wb.phase_blend.export_aligned_b,
+                           wb.phase_blend.export_blend,
+                           wb.phase_blend.export_report):
+                signal.emit()
+            assert dialog.call_count == 1
+            assert set(out_dir.iterdir()) == written   # no stale artifacts
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
 def test_legacy_window_unchanged_at_rest(extended):
     # rank via the legacy path and confirm the workbench didn't alter scores
     extended.screen_panel.preset_list.setCurrentRow(0)
@@ -533,3 +758,129 @@ class QFileDialog_stub:
 
     def __exit__(self, *a):
         return False
+
+
+# ---- B08: response targets survive presets and reach the ranking job -------
+class _NoopSignal:
+    def connect(self, callback):
+        pass
+
+
+class _SyncWorker:
+    """Drop-in for AnalysisWorker: runs the queued job immediately with a
+    cooperative-cancel stub, so target forwarding is asserted without
+    threads or timing (the job is pure data plumbing, not worker logic)."""
+    finished_ok = _NoopSignal()
+    failed = _NoopSignal()
+    request_id = -1
+
+    def __init__(self, job, parent=None):
+        self._job = job
+
+    def start(self):
+        import types
+        self._job(types.SimpleNamespace(cancelled=False))
+
+
+def test_b08_preset_state_roundtrip_keeps_targets(qapp):
+    import json
+    from app.extensions.ui.response_search_panel import (PRESETS,
+                                                         ResponseSearchPanel)
+
+    panel = ResponseSearchPanel()
+    for name, (_w, _c, targets) in PRESETS.items():
+        panel._preset_btns[name].click()
+        state = panel.get_preset_state()
+        # oracle: the named preset's own target dict (production data)
+        assert state['targets'] == targets, name
+        saved = json.loads(json.dumps(state))   # save/load via JSON
+        assert saved == state, name
+        # switching away clears targets; restoring the snapshot brings them back
+        panel._preset_btns['Custom'].click()
+        assert panel.get_preset_state()['targets'] == {}
+        panel.apply_preset_state(saved)
+        restored = panel.get_preset_state()
+        assert restored['targets'] == targets, name
+        assert restored['name'] == name
+        assert restored['weights'] == state['weights']
+
+
+def test_b08_emitted_request_carries_current_targets(qapp):
+    from app.extensions.ui.response_search_panel import (PRESETS,
+                                                         ResponseSearchPanel)
+
+    panel = ResponseSearchPanel()
+    requests = []
+    panel.rank_requested.connect(requests.append)
+
+    panel._preset_btns['Fast Attack'].click()
+    panel.go_btn.click()
+    assert requests, 'go button emitted no request'
+    request = requests[-1]
+    assert request.get('targets') == PRESETS['Fast Attack'][2]
+    # emitted snapshot must not alias the panel's internal state
+    request['targets']['attack'] = 99.0
+    assert panel.get_preset_state()['targets'] == {'attack': 1.5}
+
+    panel._preset_btns['Custom'].click()
+    panel.go_btn.click()
+    assert requests[-1].get('targets') == {}
+    panel.spin_gd.setValue(1.0)   # user tweak keeps (empty) targets present
+    panel.go_btn.click()
+    assert requests[-1]['targets'] == {}
+    assert requests[-1]['weights']['gd_spread'] == 1.0
+
+
+def test_b08_workbench_search_job_forwards_targets(extended, qapp,
+                                                   monkeypatch):
+    import app.extensions.advanced_matching as am_mod
+    import app.extensions.ui.compare_workbench as wb_mod
+
+    extended.show_workbench()
+    wb = extended._workbench
+    seen = {}
+
+    def spy_rank(records, fps, service, target, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _SyncWorker)
+    monkeypatch.setattr(am_mod, 'rank_by_response', spy_rank)
+    monkeypatch.setattr(wb.service, 'fingerprint', lambda rec: None)
+
+    request = {'weights': {'tone': 1.0, 'd20': 1.5},
+               'constraints': {'max_tone_db': 3.0},
+               'targets': {'d20': 25.0},
+               'policy': 'exclude'}
+    try:
+        wb._run_response_search(request)
+    finally:
+        wb._debounce.stop()
+        wb.close()
+    assert seen, 'rank_by_response never called by the workbench search job'
+    assert seen.get('targets') is request['targets']
+
+
+def test_b08_main_window_search_job_forwards_targets(extended, qapp,
+                                                     monkeypatch):
+    import app.extensions.advanced_matching as am_mod
+    import app.extensions.ui.main_window_adapter as mw_mod
+
+    seen = {}
+
+    def spy_rank(records, fps, service, target, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(mw_mod, 'AnalysisWorker', _SyncWorker)
+    monkeypatch.setattr(am_mod, 'rank_by_response', spy_rank)
+    monkeypatch.setattr(extended.response_service, 'fingerprint',
+                        lambda rec: None)
+
+    request = {'weights': {'tone': 1.0, 'boxiness': 1.5},
+               'constraints': {'max_tone_db': 6.0},
+               'targets': {'boxiness': 0.0, 'gd_spread': 0.5},
+               'policy': 'reject'}
+    extended._run_search(request)
+    assert seen, 'rank_by_response never called by the window search job'
+    assert seen.get('targets') is request['targets']

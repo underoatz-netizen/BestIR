@@ -90,8 +90,39 @@ class PairAnalysisWorker(QThread):
             if self._cancelled:
                 return
             env_b = self._service.envelope(self._b)
+            if self._cancelled:
+                return
+            # B17: fingerprint/phase (heavy DSP: envelope + CSD + spectrogram)
+            # are consumed by the Summary and Phase tabs, so they are computed
+            # here, off the GUI thread, and delivered inside the result bundle.
+            # A failure degrades to None — the same tolerance the old GUI-side
+            # helpers had — so the pair result itself is never lost.
+            fp_a = self._safe_fingerprint(self._a)
+            if self._cancelled:
+                return
+            fp_b = self._safe_fingerprint(self._b)
+            if self._cancelled:
+                return
+            phase_a = self._safe_phase(self._a)
+            if self._cancelled:
+                return
+            phase_b = self._safe_phase(self._b)
             self.finished_ok.emit(self.request_id,
                                   {'pair': pair, 'blend': blend,
-                                   'env_a': env_a, 'env_b': env_b})
+                                   'env_a': env_a, 'env_b': env_b,
+                                   'fp_a': fp_a, 'fp_b': fp_b,
+                                   'phase_a': phase_a, 'phase_b': phase_b})
         except Exception as exc:
             self.failed.emit(self.request_id, str(exc))
+
+    def _safe_fingerprint(self, record):
+        try:
+            return self._service.fingerprint(record)
+        except Exception:
+            return None
+
+    def _safe_phase(self, record):
+        try:
+            return self._service.phase(record)
+        except Exception:
+            return None

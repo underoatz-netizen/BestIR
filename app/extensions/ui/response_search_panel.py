@@ -29,6 +29,19 @@ PRESETS = {
 }
 
 
+def preset_state(name: str) -> dict:
+    """Immutable plain-data snapshot of a named preset (B08).
+
+    Kept JSON-serializable so presets can be saved/loaded without touching
+    Qt state; `targets` are first-class members of the snapshot.
+    """
+    weights, constraints, targets = PRESETS.get(name, PRESETS['Custom'])
+    return {'name': name,
+            'weights': dict(weights),
+            'constraints': dict(constraints),
+            'targets': dict(targets)}
+
+
 class ResponseSearchPanel(QWidget):
     rank_requested = Signal(object)   # dict(request context)
 
@@ -195,6 +208,7 @@ class ResponseSearchPanel(QWidget):
         self.preset_combo.currentTextChanged.connect(self._apply_preset)
         self.go_btn.clicked.connect(self._emit)
         self.result_list.currentRowChanged.connect(self._show_explain)
+        self._targets: dict = {}
         self._apply_preset('Tight Low')
         self._last = []
 
@@ -218,15 +232,50 @@ class ResponseSearchPanel(QWidget):
         return s
 
     def _apply_preset(self, name: str):
-        weights, constraints, targets = PRESETS.get(name, PRESETS['Custom'])
+        self.apply_preset_state(preset_state(name))
+
+    def get_preset_state(self) -> dict:
+        """Plain-data snapshot of the current request spec (B08).
+
+        Includes response `targets` so a saved preset round-trips without
+        dropping them. JSON-serializable; safe to persist externally.
+        """
+        return {
+            'name': self.preset_combo.currentText(),
+            'weights': {'tone': self.spin_tone.value(),
+                        'd20': self.spin_d20.value(),
+                        'attack': self.spin_attack.value(),
+                        'boxiness': self.spin_boxiness.value(),
+                        'gd_spread': self.spin_gd.value()},
+            'constraints': {'max_tone_db': self.spin_max_tone.value()},
+            'targets': dict(self._targets),
+            'policy': self.policy_combo.currentText(),
+        }
+
+    def apply_preset_state(self, state: dict):
+        """Restore a snapshot produced by get_preset_state/preset_state.
+
+        Targets survive the restore; an explicit missing/empty `targets`
+        means "no response targets" (e.g. the Custom preset).
+        """
+        weights = state.get('weights') or {}
+        constraints = state.get('constraints') or {}
         self.spin_tone.setValue(weights.get('tone', 1.0))
         self.spin_d20.setValue(weights.get('d20', 0.0))
         self.spin_attack.setValue(weights.get('attack', 0.0))
         self.spin_boxiness.setValue(weights.get('boxiness', 0.0))
         self.spin_gd.setValue(weights.get('gd_spread', 0.0))
         self.spin_max_tone.setValue(constraints.get('max_tone_db', 3.0))
-        if self.preset_combo.currentText() != name:
+        self._targets = dict(state.get('targets') or {})
+        policy = state.get('policy')
+        if policy in ('exclude', 'reject'):
+            self.policy_combo.setCurrentText(policy)
+        name = state.get('name')
+        if name and self.preset_combo.currentText() != name:
+            # avoid the currentTextChanged handler clobbering restored targets
+            self.preset_combo.blockSignals(True)
             self.preset_combo.setCurrentText(name)
+            self.preset_combo.blockSignals(False)
 
     def _emit(self):
         self.rank_requested.emit({
@@ -236,6 +285,7 @@ class ResponseSearchPanel(QWidget):
                         'boxiness': self.spin_boxiness.value(),
                         'gd_spread': self.spin_gd.value()},
             'constraints': {'max_tone_db': self.spin_max_tone.value()},
+            'targets': dict(self._targets),   # B08: forward preset targets
             'policy': self.policy_combo.currentText(),
         })
 

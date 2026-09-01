@@ -218,6 +218,7 @@ class ExtendedMainWindow(MainWindow):
             return rank_by_response(records, fps, service, target,
                                     weights=request['weights'],
                                     constraints=request['constraints'],
+                                    targets=request.get('targets'),  # B08
                                     policy=request['policy'],
                                     max_tone_db=max_tone)
 
