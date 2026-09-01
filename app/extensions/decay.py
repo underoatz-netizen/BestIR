@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .channel_policy import mono_or_rms
 from .contracts import (AnalysisStatus, DecayConfig, DecayResult, PreparedIR)
 from .csd import DEFAULT_DECAY_BANDS, compute_csd
 from .contracts import TimeFrequencyConfig
@@ -55,7 +56,10 @@ def _schroeder_t(prepared: PreparedIR, cfg: DecayConfig):
     fitting the noise-dominated tail directly).
     """
     sr = prepared.sample_rate
-    mono = prepared.data.mean(axis=1)[prepared.onset:prepared.tail_end + 1]
+    # Stereo channel policy: RMS power aggregate (identity for mono) so an
+    # anti-phase pair [x, -x] keeps its energy instead of a silent Schroeder.
+    seg = prepared.data[prepared.onset:prepared.tail_end + 1]
+    mono = mono_or_rms(seg, axis=1)
     energy = np.cumsum((mono ** 2)[::-1])[::-1]
     total = float(energy[0]) if len(energy) else 0.0
     if total <= 0:

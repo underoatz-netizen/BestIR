@@ -21,6 +21,46 @@ from .time_frequency import (fft_power_db, hann_edge_gate, log_freq_grid,
 DEFAULT_DECAY_BANDS = ((40.0, 120.0), (120.0, 350.0), (350.0, 1000.0),
                        (1000.0, 3500.0), (3500.0, 8000.0))
 
+# ---- B13: single contract accessor for band-decay metrics ------------------
+# Producer (_csd_metrics) and every consumer (CsdView, fingerprinting) must
+# derive metric keys through `decay_metric_key` and read validity through
+# `decay_validity`, so the key is `D20_<band>_ms_valid` everywhere.
+DECAY_UNAVAILABLE_NOISY = 'noisy'
+DECAY_UNAVAILABLE_INSUFFICIENT = 'insufficient duration'
+DECAY_UNAVAILABLE_UNSUPPORTED = 'unsupported'
+DECAY_UNAVAILABLE_INVALID = 'invalid'
+
+_NOTE_NO_DATA = 'no valid band data'
+_NOTE_NOT_DECAYED = 'band never decayed to target in view'
+
+
+def decay_metric_key(band: str, target: float) -> str:
+    """Canonical metric key, e.g. ('40-120', 20.0) -> 'D20_40-120_ms'."""
+    return f'D{int(target)}_{band}_ms'
+
+
+def decay_validity(metrics: dict, band: str,
+                   target: float) -> tuple[bool, str]:
+    """Return (valid, state) for one band-decay metric.
+
+    `state` is 'valid' or one of the distinct unavailability reasons:
+    'noisy' (band bins fell below the reliability floor),
+    'insufficient duration' (gate too short to resolve the band edge),
+    'unsupported' (metric not produced for this band),
+    'invalid' (measured but unusable, e.g. no decay reached the target).
+    """
+    key = decay_metric_key(band, target)
+    if key not in metrics:
+        return False, DECAY_UNAVAILABLE_UNSUPPORTED
+    if metrics.get(key + '_valid'):
+        return True, 'valid'
+    note = str(metrics.get(key + '_note') or '')
+    if 'cannot resolve' in note:
+        return False, DECAY_UNAVAILABLE_INSUFFICIENT
+    if _NOTE_NO_DATA in note:
+        return False, DECAY_UNAVAILABLE_NOISY
+    return False, DECAY_UNAVAILABLE_INVALID
+
 
 def compute_csd(prepared: PreparedIR, cfg: TimeFrequencyConfig,
                 bands: tuple = DEFAULT_DECAY_BANDS) -> CSDResult:
@@ -28,9 +68,12 @@ def compute_csd(prepared: PreparedIR, cfg: TimeFrequencyConfig,
         return CSDResult(key=prepared.key, cfg=cfg, status=prepared.status,
                          warnings=prepared.warnings)
     sr = prepared.sample_rate
-    mono = prepared.data.mean(axis=1)
     onset, tail = prepared.onset, prepared.tail_end
-    usable = mono[onset:tail + 1]
+    # Stereo channel policy: keep every channel; the transforms below
+    # power-aggregate per-channel spectra (mean of |FFT|^2), never a signed
+    # channel mean, so an anti-phase pair [x, -x] cannot cancel to silence.
+    usable = prepared.data[onset:tail + 1]      # (n, ch)
+    n_ch = usable.shape[1]
     if len(usable) < 64:
         return CSDResult(key=prepared.key, cfg=cfg, status=AnalysisStatus.TOO_SHORT,
                          warnings=('useful segment too short for CSD',))
@@ -53,7 +96,13 @@ def compute_csd(prepared: PreparedIR, cfg: TimeFrequencyConfig,
     for k, g0 in enumerate(gate_starts):
         seg = usable[g0:]
         gate = hann_edge_gate(len(seg))
-        power, bins = fft_power_db(seg * gate, sr, nfft)
+        # per-channel power spectra, power-aggregated across channels; for a
+        # single channel this is exactly the legacy |FFT(seg*gate)|^2
+        power = np.zeros(nfft // 2 + 1)
+        for ch in range(n_ch):
+            p, bins = fft_power_db(seg[:, ch] * gate, sr, nfft)
+            power += p
+        power /= n_ch
         smoothed = smooth_to_grid(power, bins, grid)
         mat[:, k] = to_db(smoothed)
 
@@ -63,11 +112,16 @@ def compute_csd(prepared: PreparedIR, cfg: TimeFrequencyConfig,
 
     # reliability mask from the reference transform (H_0)
     floor_lin = 10 ** (cfg.reliability_floor_db / 10.0)
-    ref_power0, _ = fft_power_db(usable[:min(len(usable), 8192)] *
-                                 hann_edge_gate(min(len(usable), 8192)),
-                                 sr, next_pow2(min(len(usable), 8192)))
-    ref_smooth = smooth_to_grid(ref_power0, np.fft.rfftfreq(
-        next_pow2(min(len(usable), 8192)), 1.0 / sr), grid)
+    cap = min(len(usable), 8192)
+    ref_cap = next_pow2(cap)
+    ref_win = hann_edge_gate(cap)
+    ref_power = np.zeros(ref_cap // 2 + 1)
+    for ch in range(n_ch):
+        p, _ = fft_power_db(usable[:cap, ch] * ref_win, sr, ref_cap)
+        ref_power += p
+    ref_power /= n_ch
+    ref_smooth = smooth_to_grid(ref_power, np.fft.rfftfreq(
+        ref_cap, 1.0 / sr), grid)
     ref_db = to_db(ref_smooth)
     valid_mask = ref_db >= (ref_db.max() + cfg.reliability_floor_db)
 
@@ -109,7 +163,7 @@ def _csd_metrics(band_decay: dict, grid: np.ndarray, valid_mask: np.ndarray,
     curve = np.asarray(band_decay[low_key], dtype=float)
     finite = np.isfinite(curve)
     for target in (10.0, 20.0, 30.0):
-        name = f'D{int(target)}_{low_key}_ms'
+        name = decay_metric_key(low_key, target)
         # low-end validity: the reference gate must be long enough to resolve
         # roughly the lowest band edge (>= 2 cycles)
         lo_hz = float(low_key.split('-')[0])
@@ -122,7 +176,7 @@ def _csd_metrics(band_decay: dict, grid: np.ndarray, valid_mask: np.ndarray,
         if not finite.any():
             metrics[name] = None
             metrics[f'{name}_valid'] = False
-            metrics[f'{name}_note'] = 'no valid band data'
+            metrics[f'{name}_note'] = _NOTE_NO_DATA
             continue
         ref_val = float(curve[finite][0]) if finite[0] else float(curve[finite].max())
         dropped = ref_val - curve
@@ -134,7 +188,7 @@ def _csd_metrics(band_decay: dict, grid: np.ndarray, valid_mask: np.ndarray,
         else:
             metrics[name] = None
             metrics[f'{name}_valid'] = False
-            metrics[f'{name}_note'] = 'band never decayed to target in view'
+            metrics[f'{name}_note'] = _NOTE_NOT_DECAYED
 
     # decay slope over the -5..-25 dB region with fit confidence (R^2)
     ref_val = float(curve[np.isfinite(curve)][0]) if np.isfinite(curve).any() else 0.0

@@ -7,13 +7,19 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from ..styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_DIFF, COLOR_IR_A,
                            COLOR_IR_B, FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY,
                            SURFACE_CARD, SURFACE_RAISED, TEXT_MAIN, TEXT_MUTED)
+from ..metric_format import format_value, to_display_value
 from .validity_chip import ValidityChip
 
 
 class MetricCard(QFrame):
-    """Boro-styled tactile card displaying metric title, large value, and delta."""
+    """Boro-styled tactile card displaying metric title, large value, and delta.
 
-    def __init__(self, title: str, unit: str = '', parent: QWidget | None = None):
+    ``feature`` is the fingerprint feature key; raw cached values are converted
+    to the declared display ``unit`` only at render time (B12, metric_format).
+    """
+
+    def __init__(self, title: str, unit: str = '', feature: str = '',
+                 parent: QWidget | None = None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet(f"""
@@ -82,11 +88,14 @@ class MetricCard(QFrame):
         layout.addLayout(val_row)
 
         self._unit = unit
+        self._feature = feature
 
     def set_values(self, val_a: float | None, val_b: float | None, note_a: str = '', note_b: str = '') -> None:
-        unit_str = f' {self._unit}' if self._unit else ''
-        if val_a is not None:
-            self.val_a_lbl.setText(f'{val_a:.4g}{unit_str}')
+        # display-only unit conversion (raw cached values untouched)
+        disp_a = to_display_value(self._feature, val_a, self._unit)
+        disp_b = to_display_value(self._feature, val_b, self._unit)
+        if disp_a is not None:
+            self.val_a_lbl.setText(format_value(disp_a, self._unit))
             if note_a:
                 self.val_a_lbl.setToolTip(f'A: {note_a}')
         else:
@@ -94,8 +103,8 @@ class MetricCard(QFrame):
             if note_a:
                 self.val_a_lbl.setToolTip(f'A: {note_a}')
 
-        if val_b is not None:
-            self.val_b_lbl.setText(f'{val_b:.4g}{unit_str}')
+        if disp_b is not None:
+            self.val_b_lbl.setText(format_value(disp_b, self._unit))
             if note_b:
                 self.val_b_lbl.setToolTip(f'B: {note_b}')
         else:
@@ -103,9 +112,10 @@ class MetricCard(QFrame):
             if note_b:
                 self.val_b_lbl.setToolTip(f'B: {note_b}')
 
-        if val_a is not None and val_b is not None:
-            delta = val_a - val_b
-            self.delta_lbl.setText(f'{delta:+.3g}{unit_str}')
+        if disp_a is not None and disp_b is not None:
+            delta = disp_a - disp_b
+            self.delta_lbl.setText(
+                format_value(delta, self._unit, signed=True, sig=3))
             if abs(delta) < 1e-6:
                 self.delta_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-family: {FONT_FAMILY_MONO}; font-size: 11pt; font-weight: 700;")
             else:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .channel_policy import mono_or_rms
 from .contracts import (AnalysisStatus, BlendPrediction, CancellationRisk,
                         PairComparisonConfig, PairComparisonResult, PreparedIR)
 from .pair_preparation import PreparedPair, prepare_pair
@@ -227,7 +228,11 @@ def _invalid_blend_prediction(a: PreparedIR, b: PreparedIR,
 
 
 def _mono(data: np.ndarray) -> np.ndarray:
-    return data.mean(axis=1)
+    # Channel reduction routed through the central channel policy: mono stays
+    # byte-identical, but a multi-channel anti-phase pair [x, -x] becomes |x|
+    # (RMS) instead of cancelling to near-silence (which would break GCC-PHAT
+    # delay estimation and blend prediction).
+    return mono_or_rms(data, axis=1)
 
 
 def _estimate_delay(xa: np.ndarray, xb: np.ndarray, sr: int,
@@ -340,7 +345,9 @@ def _verify_against_time_domain(a: PreparedIR, b: PreparedIR,
         delay_samples=float(tau), polarity=int(s),
     )
     mix, _, _ = blend_sum(a, b, pair, ratio)
-    mono_mix = mix.mean(axis=1)
+    # same channel-policy reduction as the prediction path: mono is unchanged,
+    # stereo anti-phase channels are RMS-combined instead of cancelling.
+    mono_mix = mono_or_rms(mix, axis=1)
     ref_db = 20 * np.log10(np.maximum(np.abs(np.fft.rfft(mono_mix, nfft)), 1e-30))
     return float(np.sqrt(np.mean((predicted_db[reliable] -
                                   ref_db[reliable]) ** 2)))

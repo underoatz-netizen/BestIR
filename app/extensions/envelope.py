@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import hilbert
 
+from .channel_policy import power_aggregate, rms_aggregate
 from .contracts import (AnalysisStatus, EnvelopeConfig, EnvelopeResult,
                         PreparedIR)
 
@@ -19,17 +20,23 @@ def compute_envelope(prepared: PreparedIR, cfg: EnvelopeConfig) -> EnvelopeResul
     sr = prepared.sample_rate
     x = prepared.data
     onset = prepared.onset
+    seg = x[onset:]                                 # (n, ch)
+    n_ch = seg.shape[1]
 
-    # channel-mean signed signal (documented aggregate); polarity/energy use it
-    signed = x[onset:].mean(axis=1)
-    mono_seg = np.max(np.abs(x[onset:]), axis=1)
-    time_ms = np.arange(len(signed), dtype=np.float64) / sr * 1000.0
+    # Stereo channel policy: magnitude/energy reductions use power aggregation
+    # (mean of per-channel squares), never a signed channel mean, so an
+    # anti-phase pair [x, -x] keeps its energy. For mono each aggregate below
+    # reduces to exactly the legacy single-channel signal.
+    p2 = power_aggregate(seg, axis=1)               # energy signal (x**2 mono)
+    # analytic envelope is per-channel along TIME (axis=0); hilbert() would
+    # otherwise transform the length-1 channel axis and degenerate mono to |x|
+    env_ch = np.abs(hilbert(seg, axis=0))           # per-channel analytic env
+    hilb = rms_aggregate(env_ch, axis=1)            # |hilbert(x)| for mono
+    time_ms = np.arange(len(seg), dtype=np.float64) / sr * 1000.0
 
-    # analytic envelope (fine structure)
-    hilb = np.abs(hilbert(signed))
     # short-window RMS envelope (stable energy comparisons)
     win = max(1, int(cfg.rms_window_ms * sr / 1000))
-    sq = signed ** 2
+    sq = p2
     cs = np.concatenate(([0.0], np.cumsum(sq)))
     idx0 = np.arange(0, len(sq))
     w_end = np.minimum(idx0 + win, len(sq))
@@ -43,19 +50,25 @@ def compute_envelope(prepared: PreparedIR, cfg: EnvelopeConfig) -> EnvelopeResul
 
     hilbert_env = _norm(hilb)
     rms_env_n = _norm(rms_env)
+    mono_seg = np.max(np.abs(seg), axis=1)
     peak_hold = np.maximum.accumulate(_norm(mono_seg)) if cfg.peak_hold else None
 
-    # peak time / polarity on the signed onset-relative signal
-    peak_rel = int(np.argmax(np.abs(signed)))
-    polarity = 1 if signed[peak_rel] >= 0 else -1
+    # peak time / polarity on the dominant channel's signed signal (mono: the
+    # only channel, identical to the legacy channel-mean behavior)
+    if n_ch == 1:
+        ref = seg[:, 0]
+    else:
+        ref = seg[:, int(np.argmax(np.max(np.abs(seg), axis=0)))]
+    peak_rel = int(np.argmax(np.abs(ref)))
+    polarity = 1 if ref[peak_rel] >= 0 else -1
     peak_time_ms = peak_rel / sr * 1000.0
 
     # rise time 10-90% (validity-guarded)
     rise_ms, rise_valid, rise_reason = _rise_time(
         hilbert_env, peak_rel, sr, cfg)
 
-    # energy fractions on the onset-relative signal
-    energy = np.cumsum(signed.astype(np.float64) ** 2)
+    # energy fractions on the power-aggregated energy signal
+    energy = np.cumsum(p2.astype(np.float64))
     total = energy[-1] if len(energy) else 0.0
 
     def _frac(ms: float) -> float | None:
@@ -73,12 +86,12 @@ def compute_envelope(prepared: PreparedIR, cfg: EnvelopeConfig) -> EnvelopeResul
     else:
         elr = None
 
-    centroid = (float(np.sum(time_ms * (signed ** 2)) / np.sum(signed ** 2))
-                if np.sum(signed ** 2) > 0 else None)
+    centroid = (float(np.sum(time_ms * p2) / np.sum(p2))
+                if np.sum(p2) > 0 else None)
 
-    peak_abs = float(np.max(np.abs(signed))) if len(signed) else 0.0
-    rms_abs = (float(np.sqrt(np.mean(signed ** 2)))
-               if len(signed) else 0.0)
+    peak_abs = float(np.max(np.sqrt(p2))) if len(p2) else 0.0
+    rms_abs = (float(np.sqrt(np.mean(p2)))
+               if len(p2) else 0.0)
     crest = peak_abs / rms_abs if rms_abs > 0 else None
 
     tail_ms = (prepared.tail_end - onset) / sr * 1000.0

@@ -703,6 +703,107 @@ def test_b05_export_blocked_once_pair_becomes_stale(extended, qapp, tmp_path):
         wb.close()
 
 
+# ---- B09: the visible CSD is decided by selection, not completion order ----
+class _FakeSpecWorker:
+    """Stand-in for a running CSD worker so the test can deliver results in an
+    explicit completion order through the real _on_spec_done callback path."""
+
+    def __init__(self, request_id):
+        self.request_id = request_id
+        self.cancelled = False
+
+    def isRunning(self):
+        return not self.cancelled
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _rendered_csd_matrix(view):
+    """The heatmap currently drawn on the 2D fallback plot (None under GL)."""
+    import pyqtgraph as pg
+    for item in view._plot.getPlotItem().items:
+        if isinstance(item, pg.ImageItem):
+            return np.asarray(item.image)
+    return None
+
+
+@pytest.mark.parametrize('order', ['ab', 'ba'])
+def test_b09_csd_visible_source_independent_of_completion_order(extended, qapp,
+                                                                order):
+    """B09 gate: the single CSD plot must show the selected source (default A)
+    whichever of A/B finished first — completion order never decides."""
+    from app.extensions.contracts import AnalysisStatus
+    from app.extensions.csd import compute_csd
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    try:
+        wb.set_pair(a, b)
+        wb._debounce.stop()   # keep the real pair worker out of the test
+
+        tf = wb._selection_context.tf_cfg
+        csd_a = compute_csd(wb.service.prepared(a), tf)
+        csd_b = compute_csd(wb.service.prepared(b), tf)
+        assert csd_a.status == csd_b.status == AnalysisStatus.OK
+        assert csd_a.key != csd_b.key
+        assert csd_a.magnitude_db is not csd_b.magnitude_db
+
+        rids = {'csd_a': 9101, 'csd_b': 9102}
+        wb._spec_workers = {k: _FakeSpecWorker(v) for k, v in rids.items()}
+        deliveries = [('csd_a', csd_a), ('csd_b', csd_b)]
+        if order == 'ba':
+            deliveries.reverse()
+        for pos, (key, res) in enumerate(deliveries):
+            _run_queued_callback(
+                qapp,
+                lambda k=key, r=res, i=rids[key]: wb._on_spec_done(k, i, r))
+            # after any single arrival the view still defaults to A
+            assert wb.csd.current_source == 'A'
+            if order == 'ba' and pos == 0:
+                # B arrived first: it must NOT become the displayed plot
+                assert wb.csd.displayed_csd is None
+                assert 'No CSD result for IR A' in \
+                    wb.csd._decay_text.toPlainText()
+                assert wb.csd._csd_by_source['B'] is csd_b
+
+        # completion order did not decide anything: A is stored and displayed
+        assert wb.csd.current_source == 'A'
+        assert wb.csd.displayed_csd is csd_a
+        assert wb.csd._csd_by_source['A'] is csd_a
+        assert wb.csd._csd_by_source['B'] is csd_b
+        assert wb.csd.source_caption.text() == 'Showing IR A'
+        assert 'IR A' in str(wb.csd._plot.getPlotItem().titleLabel.text)
+        if not wb.csd.using_opengl:
+            assert np.array_equal(_rendered_csd_matrix(wb.csd),
+                                  csd_a.magnitude_db.T)
+
+        # metrics panel renders A's evidence while A is selected
+        def _fmt(v):
+            return f'{v:.0f} ms' if isinstance(v, (int, float)) else 'n/a'
+        text_a = wb.csd._decay_text.toPlainText()
+        assert '• 40-120 Hz Band' in text_a
+        assert _fmt(csd_a.metrics['D20_40-120_ms']) in text_a
+
+        # explicitly selecting B shows B's data + metrics (A stays stored)
+        _click_through_event_loop(qapp, wb.csd.btn_source_b)
+        assert wb.csd.current_source == 'B'
+        assert wb.csd.displayed_csd is csd_b
+        assert wb.csd._csd_by_source['A'] is csd_a
+        assert wb.csd.source_caption.text() == 'Showing IR B'
+        assert 'IR B' in str(wb.csd._plot.getPlotItem().titleLabel.text)
+        if not wb.csd.using_opengl:
+            assert np.array_equal(_rendered_csd_matrix(wb.csd),
+                                  csd_b.magnitude_db.T)
+        text_b = wb.csd._decay_text.toPlainText()
+        assert '• 40-120 Hz Band' in text_b
+        assert _fmt(csd_b.metrics['D20_40-120_ms']) in text_b
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
 def test_legacy_window_unchanged_at_rest(extended):
     # rank via the legacy path and confirm the workbench didn't alter scores
     extended.screen_panel.preset_list.setCurrentRow(0)
@@ -884,3 +985,218 @@ def test_b08_main_window_search_job_forwards_targets(extended, qapp,
     extended._run_search(request)
     assert seen, 'rank_by_response never called by the window search job'
     assert seen.get('targets') is request['targets']
+
+
+# ---- B15: spectrogram A/B/difference share one grid, reference and axes ----
+def _b15_prepared(x, sr):
+    from app.extensions.contracts import (AudioBuffer, PreprocessingConfig,
+                                          SourceKey)
+    from app.extensions.preprocessing import prepare
+    from tests.extensions import fixtures as fx
+
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    arr = arr.copy()
+    arr.setflags(write=False)
+    return prepare(AudioBuffer(SourceKey('mem', 0, 0, sr, arr.shape[1]), arr),
+                   PreprocessingConfig())
+
+
+def _b15_specs():
+    """Long (many-frame) vs short (few-frame) pair on deliberately unequal
+    time grids — the B15 reproduction shape."""
+    from app.extensions.contracts import TimeFrequencyConfig
+    from app.extensions.spectrogram import compute_spectrogram
+    from tests.extensions import fixtures as fx
+
+    cfg = TimeFrequencyConfig(profile='balanced')
+    long_spec = compute_spectrogram(
+        _b15_prepared(fx.boxy_fixture(300.0, 0.08, n=24000), fx.SR), cfg)
+    short_spec = compute_spectrogram(
+        _b15_prepared(fx.decay_fixture(300.0, 0.02, n=1536), fx.SR), cfg)
+    return long_spec, short_spec
+
+
+def _b15_hand(freqs, times, status=None):
+    from app.extensions.contracts import (AnalysisStatus, SourceKey,
+                                          SpectrogramResult,
+                                          TimeFrequencyConfig)
+
+    return SpectrogramResult(
+        key=SourceKey('hand', 0, 0, 48000, 1), cfg=TimeFrequencyConfig(),
+        status=status or AnalysisStatus.OK, freqs=freqs, times_ms=times,
+        magnitude_db=np.zeros((len(freqs), len(times))),
+        valid_mask=np.ones(len(freqs), dtype=bool))
+
+
+def _b15_heatmap(view, key):
+    """The ImageItem currently rendered on one panel (None when absent)."""
+    import pyqtgraph as pg
+
+    for item in view._plots[key].getPlotItem().items:
+        if isinstance(item, pg.ImageItem):
+            return item
+    return None
+
+
+def _b15_view_range(view, key):
+    return np.asarray(view._plots[key].getViewBox().viewRange(), dtype=float)
+
+
+def test_b15_ui_uneven_frames_render_difference_over_overlap(qapp):
+    """A many-vs-few frame pair renders a valid difference over the exact
+    physical overlap, matching the pure comparison oracle."""
+    from app.extensions.spectrogram import compare_spectrograms
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    long_spec, short_spec = _b15_specs()
+    assert len(long_spec.times_ms) >= 4 * len(short_spec.times_ms)
+    assert len(short_spec.times_ms) <= 8
+
+    view = SpectrogramView()
+    view.show_pair(long_spec, short_spec)
+    cmp = compare_spectrograms(long_spec, short_spec)
+    assert cmp.available, cmp.reason
+
+    item = _b15_heatmap(view, 'diff')
+    assert item is not None
+    rendered = np.asarray(item.image).T          # ImageItem stores mag.T
+    assert rendered.shape == cmp.diff_db.shape
+    assert np.isfinite(rendered).any()
+    # rendered mask and values equal the shared-grid oracle
+    assert np.array_equal(np.isfinite(rendered), cmp.valid_diff)
+    assert np.allclose(rendered[cmp.valid_diff], cmp.diff_db[cmp.valid_diff])
+
+    # the shared grid is the physical overlap of the two sources
+    assert np.isclose(cmp.times_ms[0], max(long_spec.times_ms[0],
+                                           short_spec.times_ms[0]))
+    assert np.isclose(cmp.times_ms[-1], min(long_spec.times_ms[-1],
+                                            short_spec.times_ms[-1]))
+    footer = view._diff_label.text()
+    assert 'Shared grid' in footer
+    assert f'{cmp.overlap_time_ms[0]:.1f}' in footer
+    assert f'{cmp.overlap_time_ms[1]:.1f}' in footer
+
+
+def test_b15_ui_ab_panels_share_axes_and_db_reference(qapp):
+    """A, B and Difference display identical axes and A/B share one dB
+    reference — the same displayed frame, the same level mapping."""
+    from app.extensions.spectrogram import compare_spectrograms
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    spec_a, spec_b = _b15_specs()
+    dyn = 60.0
+    view = SpectrogramView()
+    view.show_pair(spec_a, spec_b, dyn=dyn)
+    cmp = compare_spectrograms(spec_a, spec_b)
+    assert cmp.available, cmp.reason
+
+    # identical displayed axes on all three panels
+    range_a = _b15_view_range(view, 'A')
+    np.testing.assert_array_equal(range_a, _b15_view_range(view, 'B'))
+    np.testing.assert_array_equal(range_a, _b15_view_range(view, 'diff'))
+    # ...and those axes frame the shared grid
+    assert range_a[1][0] <= cmp.times_ms[0] < cmp.times_ms[-1] <= range_a[1][1]
+
+    # identical dB reference (levels) on A and B, equal to the oracle's ref_db
+    levels_a = tuple(float(v) for v in _b15_heatmap(view, 'A').getLevels())
+    levels_b = tuple(float(v) for v in _b15_heatmap(view, 'B').getLevels())
+    assert levels_a == levels_b
+    assert np.isclose(levels_a[1], cmp.ref_db)
+    assert np.isclose(levels_a[0], cmp.ref_db - dyn)
+    # both magnitudes are relative to that one common reference
+    mag_a = np.asarray(_b15_heatmap(view, 'A').image).T
+    mag_b = np.asarray(_b15_heatmap(view, 'B').image).T
+    assert np.nanmax(mag_a) <= 1e-9 and np.nanmax(mag_b) <= 1e-9
+
+
+def test_b15_ui_difference_levels_are_symmetric_around_zero(qapp):
+    """The difference scale is diverging: exactly zero-centred, covering the
+    rendered |dB| range."""
+    from app.extensions.spectrogram import compare_spectrograms
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    spec_a, spec_b = _b15_specs()
+    view = SpectrogramView()
+    view.show_pair(spec_a, spec_b)
+    cmp = compare_spectrograms(spec_a, spec_b)
+    assert cmp.available, cmp.reason
+
+    levels = tuple(float(v) for v in _b15_heatmap(view, 'diff').getLevels())
+    assert np.isclose(levels[0], -levels[1])          # zero exactly centred
+    rendered = np.asarray(_b15_heatmap(view, 'diff').image).T
+    finite = rendered[np.isfinite(rendered)]
+    assert levels[1] >= float(np.abs(finite).max())   # scale covers the data
+    expected = max(5.0, float(np.ceil(np.abs(finite).max() / 5.0) * 5.0))
+    assert levels[1] == pytest.approx(expected)       # 5 dB steps, min ±5
+
+
+def test_b15_ui_swap_negates_difference_and_preserves_view_ranges(qapp):
+    """Swapping A/B negates the rendered difference image while all three
+    panels keep identical displayed ranges."""
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    spec_a, spec_b = _b15_specs()
+    view = SpectrogramView()
+    view.show_pair(spec_a, spec_b)
+    ranges_before = {key: _b15_view_range(view, key) for key in view._plots}
+    diff_before = np.asarray(_b15_heatmap(view, 'diff').image).T.copy()
+
+    view.show_pair(spec_b, spec_a)
+    diff_after = np.asarray(_b15_heatmap(view, 'diff').image).T
+
+    for key in ranges_before:
+        np.testing.assert_array_equal(ranges_before[key],
+                                      _b15_view_range(view, key))
+    assert np.array_equal(np.isnan(diff_before), np.isnan(diff_after))
+    assert np.allclose(diff_after, -diff_before, equal_nan=True)
+
+
+def test_b15_ui_no_overlap_pair_shows_explicit_reason(qapp):
+    """A time-disjoint pair explains itself in the footer and on the
+    difference panel instead of silently rendering nothing."""
+    import pyqtgraph as pg
+
+    from app.extensions.time_frequency import log_freq_grid
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    grid = log_freq_grid(50, 20000, 24)
+    view = SpectrogramView()
+    view.show_pair(_b15_hand(grid, np.linspace(0, 100, 20)),
+                   _b15_hand(grid, np.linspace(200, 300, 20)))
+
+    text = view._diff_label.text().lower()
+    assert 'difference unavailable' in text
+    assert 'overlap' in text and 'time' in text
+    assert _b15_heatmap(view, 'diff') is None
+    messages = [item.toPlainText().lower()
+                for item in view._plots['diff'].getPlotItem().items
+                if isinstance(item, pg.TextItem)]
+    assert any('unavailable' in m for m in messages)
+    # individually valid sides still render on their own native grids
+    assert _b15_heatmap(view, 'A') is not None
+    assert _b15_heatmap(view, 'B') is not None
+
+
+def test_b15_ui_malformed_side_shows_reason_and_b07_markers(qapp):
+    """B07 markers survive the B15 rewrite: an invalid side is named with its
+    status and the panel refuses to fake a comparison."""
+    from app.extensions.contracts import AnalysisStatus
+    from app.extensions.time_frequency import log_freq_grid
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+
+    grid = log_freq_grid(50, 20000, 24)
+    good = _b15_hand(grid, np.linspace(0, 100, 20))
+    for bad, marker in ((AnalysisStatus.SILENT, 'silent'),
+                        (AnalysisStatus.TOO_SHORT, 'too short')):
+        view = SpectrogramView()
+        view.show_pair(good,
+                       _b15_hand(grid, np.linspace(0, 100, 20), status=bad))
+        visible = ' '.join(label.text().lower()
+                           for label in view.findChildren(QLabel))
+        assert marker in visible
+        assert any(m in visible for m in
+                   ('no data', 'unavailable', 'invalid'))
+        assert _b15_heatmap(view, 'B') is None    # no heatmap from invalid B
+        assert _b15_heatmap(view, 'A') is not None

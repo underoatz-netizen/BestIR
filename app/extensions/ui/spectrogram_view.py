@@ -1,6 +1,10 @@
 """Spectrogram comparison view: A, B and difference heatmaps (WP-07).
 
-Enhanced with Boro UI styling, color-coded panel headers, and symmetric difference scale.
+B15: A, B and Difference render on the shared reference grid produced by
+``compare_spectrograms`` (app/extensions/spectrogram.py) — identical time and
+frequency axes, one common dB reference, a diverging difference scale centred
+at zero, and an explicit reason instead of a blank panel whenever the pair
+cannot be compared.
 """
 from __future__ import annotations
 
@@ -10,7 +14,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QVBoxLayout,
                                QWidget)
 
-from app.extensions.contracts import AnalysisStatus
+from app.extensions.spectrogram import (compare_spectrograms,
+                                        spectrogram_error)
 
 from .styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_DIFF, COLOR_IR_A,
                           COLOR_IR_B, FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY,
@@ -20,6 +25,7 @@ _TICKS = [(20, '20'), (50, '50'), (100, '100'), (200, '200'), (500, '500'),
           (1000, '1k'), (2000, '2k'), (5000, '5k'), (10000, '10k'), (20000, '20k')]
 
 _LUT = None
+_DIFF_LUT = None
 
 
 def _lut():
@@ -34,59 +40,50 @@ def _lut():
     return _LUT
 
 
-def _heatmap(result, dyn):
+def _diff_lut():
+    """Diverging blue → neutral → orange scale, continuous through zero."""
+    global _DIFF_LUT
+    if _DIFF_LUT is None:
+        lut = np.zeros((256, 3), dtype=np.ubyte)
+        for i in range(256):
+            v = i / 255.0          # 0..1 across -max..+max
+            if v < 0.5:
+                t = v / 0.5        # 0..1 from -max to 0
+                lut[i] = [(1 - t) * 12 + t * 46,
+                          (1 - t) * 22 + t * 46,
+                          (1 - t) * 82 + t * 48]
+            else:
+                t = (v - 0.5) / 0.5  # 0..1 from 0 to +max
+                lut[i] = [(1 - t) * 46 + t * 215,
+                          (1 - t) * 46 + t * 72,
+                          (1 - t) * 48 + t * 28]
+        _DIFF_LUT = lut
+    return _DIFF_LUT
+
+
+def _heatmap(mag, freqs, times_ms, lut, levels):
+    """ImageItem for one matrix on an explicit (log-freq, linear-time) grid."""
     img = pg.ImageItem(axisOrder='row-major')
-    mag = np.asarray(result.magnitude_db, dtype=float)
     nf, nt = mag.shape
-    x0 = float(np.log10(result.freqs[0]))
-    x1 = float(np.log10(result.freqs[-1]))
-    t0 = float(result.times_ms[0])
-    t1 = float(result.times_ms[-1]) if nt > 1 else t0 + 1.0
+    x0 = float(np.log10(freqs[0]))
+    x1 = float(np.log10(freqs[-1]))
+    t0 = float(times_ms[0])
+    t1 = float(times_ms[-1]) if nt > 1 else t0 + 1.0
     img.setImage(mag.T)
     img.setRect(x0, t0, (x1 - x0) * nf / (nf - 1) if nf > 1 else 1.0,
                 (t1 - t0) * nt / (nt - 1) if nt > 1 else 1.0)
-    img.setLookupTable(_lut())
-    img.setLevels((-dyn, 0))
+    img.setLookupTable(lut)
+    img.setLevels(levels)
     return img
 
 
-def _status_text(result) -> str:
-    status = getattr(result, 'status', None)
-    value = getattr(status, 'value', status)
-    return str(value).replace('_', ' ') if value is not None else 'unavailable'
-
-
-def _spectrogram_error(result) -> str | None:
-    if result is None:
-        return 'unavailable'
-    if getattr(result, 'status', None) != AnalysisStatus.OK:
-        return _status_text(result)
-    if (getattr(result, 'magnitude_db', None) is None or
-            getattr(result, 'freqs', None) is None or
-            getattr(result, 'times_ms', None) is None):
-        return 'missing spectrogram data'
-    try:
-        magnitude = np.asarray(result.magnitude_db, dtype=float)
-        freqs = np.asarray(result.freqs, dtype=float)
-        times = np.asarray(result.times_ms, dtype=float)
-    except (TypeError, ValueError):
-        return 'malformed spectrogram data'
-    if magnitude.ndim != 2:
-        return 'magnitude matrix is not two-dimensional'
-    if freqs.ndim != 1 or not len(freqs):
-        return 'frequency axis is missing or malformed'
-    if times.ndim != 1 or not len(times):
-        return 'time axis is missing or malformed'
-    if magnitude.shape != (len(freqs), len(times)):
-        return 'magnitude matrix does not match its axes'
-    if (not np.all(np.isfinite(magnitude)) or
-            not np.all(np.isfinite(freqs)) or not np.all(freqs > 0) or
-            not np.all(np.isfinite(times))):
-        return 'spectrogram data contains invalid values'
-    if ((len(freqs) > 1 and np.any(np.diff(freqs) <= 0)) or
-            (len(times) > 1 and np.any(np.diff(times) <= 0))):
-        return 'spectrogram axes must increase'
-    return None
+def _diff_scale(diff: np.ndarray) -> float:
+    """Symmetric difference scale: max |dB| rounded up to a 5 dB multiple."""
+    vals = diff[np.isfinite(diff)]
+    if not len(vals):
+        return 5.0
+    m = float(np.max(np.abs(vals)))
+    return max(5.0, float(np.ceil(m / 5.0) * 5.0))
 
 
 def _style(plot: pg.PlotWidget):
@@ -158,60 +155,86 @@ class SpectrogramView(QWidget):
         """)
         main_layout.addWidget(self._diff_label, 0)
 
+    # ---- rendering helpers -------------------------------------------------
+    @staticmethod
+    def _set_axes(plot: pg.PlotWidget, freqs, times_ms):
+        x0 = float(np.log10(freqs[0]))
+        x1 = float(np.log10(freqs[-1]))
+        t0 = float(times_ms[0])
+        t1 = float(times_ms[-1]) if len(times_ms) > 1 else t0 + 1.0
+        plot.setXRange(x0, x1, padding=0.02)
+        plot.setYRange(t0, t1, padding=0.02)
+        plot.disableAutoRange()
+
+    def _set_shared_axes(self, freqs, times_ms):
+        for plot in self._plots.values():
+            self._set_axes(plot, freqs, times_ms)
+
+    def _plot_message(self, plot: pg.PlotWidget, text: str, color):
+        item = pg.TextItem(text, color=color, anchor=(0.5, 0.5))
+        plot.addItem(item)
+        (x0, x1), (y0, y1) = plot.getViewBox().viewRange()
+        item.setPos((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+    def _render_own(self, plot: pg.PlotWidget, spec, dyn: float):
+        """Render a single valid side on its own native grid (pair not
+        comparable — no shared grid exists)."""
+        mag = np.asarray(spec.magnitude_db, dtype=float)
+        valid = getattr(spec, 'valid_mask', None)
+        if valid is not None and len(valid) == mag.shape[0]:
+            mag = np.where(np.asarray(valid, dtype=bool)[:, None], mag, np.nan)
+        freqs = np.asarray(spec.freqs, dtype=float)
+        times = np.asarray(spec.times_ms, dtype=float)
+        plot.addItem(_heatmap(mag, freqs, times, _lut(), (-dyn, 0.0)))
+        self._set_axes(plot, freqs, times)
+
+    # ---- public API --------------------------------------------------------
     def show_pair(self, spec_a, spec_b, dyn: float = 60.0):
-        self._plots['A'].clear()
-        self._plots['B'].clear()
-        self._plots['diff'].clear()
-        error_a = _spectrogram_error(spec_a)
-        error_b = _spectrogram_error(spec_b)
-        self._pair_unavailable = bool(error_a or error_b)
-        if error_a is None:
-            self._plots['A'].addItem(_heatmap(spec_a, dyn))
-        if error_b is None:
-            self._plots['B'].addItem(_heatmap(spec_b, dyn))
-        if self._pair_unavailable:
-            messages = []
-            if error_a is not None:
-                messages.append(f'No data for IR A: {error_a}.')
-            if error_b is not None:
-                messages.append(f'No data for IR B: {error_b}.')
-            messages.append('Difference unavailable.')
-            self._diff_label.setText(' '.join(messages))
+        for plot in self._plots.values():
+            plot.clear()
+        cmp = compare_spectrograms(spec_a, spec_b)
+        self._pair_unavailable = not cmp.available
+        if not cmp.available:
+            self._show_pair_unavailable(spec_a, spec_b, cmp.reason, dyn)
             return
 
-        fa = np.asarray(spec_a.freqs, dtype=float)
-        fb = np.asarray(spec_b.freqs, dtype=float)
-        ta = np.asarray(spec_a.times_ms, dtype=float)
-        tb = np.asarray(spec_b.times_ms, dtype=float)
-        if not (len(fa) == len(fb) and len(ta) == len(tb) and
-                np.allclose(fa, fb) and np.allclose(ta, tb)):
-            self._pair_unavailable = True
-            self._diff_label.setText(
-                'Difference unavailable: IR A and IR B spectrogram axes do not match.')
-            return
-
-        diff = (np.asarray(spec_a.magnitude_db, dtype=float) -
-                np.asarray(spec_b.magnitude_db, dtype=float))
-        if not np.all(np.isfinite(diff)):
-            self._pair_unavailable = True
-            self._diff_label.setText(
-                'Difference unavailable: spectrogram data contains invalid values.')
-            return
-        img = pg.ImageItem(axisOrder='row-major')
-        nf, nt = diff.shape
-        x0 = float(np.log10(fa[0]))
-        x1 = float(np.log10(fa[-1]))
-        t0 = float(ta[0])
-        t1 = float(ta[-1]) if nt > 1 else t0 + 1.0
-        img.setImage(diff.T)
-        img.setRect(x0, t0, (x1 - x0) * nf / (nf - 1) if nf > 1 else 1.0,
-                    (t1 - t0) * nt / (nt - 1) if nt > 1 else 1.0)
-        img.setLookupTable(_lut())
-        img.setLevels((-15, 15))
-        self._plots['diff'].addItem(img)
+        mag_a = np.where(cmp.valid_a, cmp.magnitude_a_db, np.nan)
+        mag_b = np.where(cmp.valid_b, cmp.magnitude_b_db, np.nan)
+        diff = np.where(cmp.valid_diff, cmp.diff_db, np.nan)
+        levels = (cmp.ref_db - dyn, cmp.ref_db)
+        self._plots['A'].addItem(
+            _heatmap(mag_a, cmp.freqs, cmp.times_ms, _lut(), levels))
+        self._plots['B'].addItem(
+            _heatmap(mag_b, cmp.freqs, cmp.times_ms, _lut(), levels))
+        dmax = _diff_scale(cmp.diff_db)
+        self._plots['diff'].addItem(
+            _heatmap(diff, cmp.freqs, cmp.times_ms, _diff_lut(),
+                     (-dmax, dmax)))
+        # identical displayed axes on all three panels
+        self._set_shared_axes(cmp.freqs, cmp.times_ms)
         self._diff_label.setText(
-            'Difference scale +/-15 dB: Bright = IR A has more persistent energy, '
-            'Dark = IR B has more.')
+            f'Shared grid {cmp.overlap_time_ms[0]:.1f}–{cmp.overlap_time_ms[1]:.1f} ms, '
+            f'{cmp.overlap_freq_hz[0]:.0f}–{cmp.overlap_freq_hz[1]:.0f} Hz; '
+            f'A/B dB reference {cmp.ref_db:+.1f} dB; difference ±{dmax:.0f} dB '
+            f'centred at 0 (orange = A louder, blue = B louder).')
+
+    def _show_pair_unavailable(self, spec_a, spec_b, reason: str,
+                               dyn: float):
+        """Explicit no-data panels: render each individually-valid side on
+        its own grid and explain the pair incompatibility in the footer."""
+        messages = []
+        for key, spec in (('A', spec_a), ('B', spec_b)):
+            err = spectrogram_error(spec)
+            if err is not None:
+                messages.append(f'No data for IR {key}: {err}.')
+                self._plot_message(self._plots[key], f'IR {key}: {err}',
+                                   TEXT_MUTED)
+            else:
+                self._render_own(self._plots[key], spec, dyn)
+        self._plot_message(self._plots['diff'], 'Difference unavailable',
+                           TEXT_MUTED)
+        messages.append(f'Difference unavailable: {reason}.')
+        self._diff_label.setText(' '.join(messages))
 
     def show_metrics(self, metrics_a: dict, metrics_b: dict):
         if self._pair_unavailable:

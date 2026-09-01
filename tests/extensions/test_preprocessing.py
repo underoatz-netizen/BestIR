@@ -100,6 +100,52 @@ def test_tail_bound_stops_before_file_end_for_decaying_ir():
     assert res.useful_ms() > 5
 
 
+def test_sustained_long_ir_truncated_to_post_onset_cap():
+    sr = fx.SR
+    n = 2 * sr                                   # 2 s sustained signal
+    t = np.arange(n) / sr
+    x = np.sin(2 * np.pi * 200.0 * t) * (t >= 0.001)   # never decays
+    cfg = PreprocessingConfig(max_length_ms=200.0)
+    res = _prep(x, cfg=cfg)
+    max_frames = int(round(cfg.max_length_ms * sr / 1000.0))
+    assert res.status == AnalysisStatus.OK
+    assert res.data.shape[0] == res.onset + max_frames
+    assert res.data.shape[0] < n                 # really truncated
+    assert any('truncated' in w.lower() for w in res.warnings)
+    assert res.tail_end < res.data.shape[0]      # clamped inside capped signal
+    assert res.onset < res.data.shape[0]
+
+
+def test_short_decaying_ir_untouched_by_cap():
+    x = fx.decay_fixture(80.0, 0.01, n=2400)     # 50 ms decay, shorter than cap
+    cfg = PreprocessingConfig(max_length_ms=200.0)
+    res = _prep(x, cfg=cfg)
+    assert res.status == AnalysisStatus.OK
+    assert res.data.shape[0] == 2400             # whole file kept
+    assert not any('truncated' in w.lower() for w in res.warnings)
+    assert res.tail_end < res.data.shape[0]
+    assert res.onset < res.data.shape[0]
+
+
+def test_onset_and_dc_removal_unchanged_with_cap():
+    delay_ms = 3.0
+    x = fx.decay_fixture(100.0, 0.02, delay_ms=delay_ms, n=24000) + 0.005
+    expected = int(delay_ms / 1000 * fx.SR) - int(1.0 * fx.SR / 1000)
+    for cap_ms in (200.0, 4000.0):
+        cfg = PreprocessingConfig(max_length_ms=cap_ms)
+        res = _prep(x, cfg=cfg)
+        assert abs(res.onset - expected) <= 1
+        # pre-onset DC bias (+0.005) removed; onset detected on the clean copy
+        pre = res.data[:max(0, res.onset - 8)]
+        assert pre.size > 0
+        assert abs(float(pre.mean())) < 1e-3
+        assert not any('truncated' in w.lower() for w in res.warnings)
+        max_frames = int(round(cap_ms * fx.SR / 1000.0))
+        assert res.data.shape[0] <= min(len(x), res.onset + max_frames)
+        assert res.tail_end < res.data.shape[0]
+        assert res.onset < res.data.shape[0]
+
+
 # ---- envelope -------------------------------------------------------------------
 def test_delayed_dirac_peak_time_and_polarity():
     x = fx.dirac(delay_s=0.004)

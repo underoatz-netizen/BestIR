@@ -370,3 +370,33 @@ def test_sensitivity_reports_both_offsets():
                          delay_samples=3.0, polarity=1, alignment='suggested')
     assert '-1' in pred.sensitivity and '+1' in pred.sensitivity
     assert pred.sensitivity['-1'] is not None and pred.sensitivity['+1'] is not None
+
+
+# ---- channel policy: anti-phase stereo must not cancel -------------------------
+def test_antiphase_stereo_pair_delay_not_silent():
+    """Anti-phase stereo [x,-x] must not collapse to silence in delay estimation
+    (channel policy: RMS reduction, never a signed channel mean)."""
+    a, b, delay = _full_buffer_delayed_pair()
+    pa = _prep(np.column_stack([a, -a]))
+    pb = _prep(np.column_stack([b, -b]))
+    res = compare_pair(pa, pb, PairComparisonConfig())
+    assert res.status == AnalysisStatus.OK
+    assert abs(res.delay_samples - delay) <= 0.5, res.delay_samples
+
+
+def test_antiphase_stereo_blend_prediction_keeps_energy_like_same_phase_twin():
+    """[x,-x] is the same mono-equivalent as [x,x] under the channel policy,
+    so blend prediction must keep the energy instead of cancelling."""
+    xa = fx.decay_fixture(100.0, 0.02, n=24000, delay_ms=2.0)
+    xb = fx.decay_fixture(150.0, 0.03, n=24000, delay_ms=2.0)
+    cfg = PairComparisonConfig(blend_ratios=(0.0, 0.5, 1.0))
+    twin = predict_blend(_prep(np.column_stack([xa, xa])),
+                         _prep(np.column_stack([xb, xb])), cfg,
+                         delay_samples=0.0, polarity=1, alignment='raw')
+    anti = predict_blend(_prep(np.column_stack([xa, -xa])),
+                         _prep(np.column_stack([xb, -xb])), cfg,
+                         delay_samples=0.0, polarity=1, alignment='raw')
+    assert twin.status == AnalysisStatus.OK and anti.status == AnalysisStatus.OK
+    np.testing.assert_allclose(anti.magnitude_db, twin.magnitude_db,
+                               rtol=0, atol=1e-9)
+    assert np.nanmax(anti.magnitude_db) > -60.0   # energy retained, not ~silence

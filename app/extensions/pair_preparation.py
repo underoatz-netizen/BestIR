@@ -7,6 +7,7 @@ from math import gcd
 import numpy as np
 from scipy.signal import resample_poly
 
+from .channel_policy import channel_count_matches
 from .contracts import AnalysisStatus, PreparedIR
 
 
@@ -55,9 +56,11 @@ def prepare_pair(a: PreparedIR, b: PreparedIR) -> PreparedPair:
                              'cannot prepare pair: audio data must be (frames, channels)',
                              a, b, rate_a, rate_b)
 
-    # Reject this before copying or resampling either source.
+    # Reject this before copying or resampling either source. The channel
+    # policy is decided centrally in channel_policy (equal channel counts
+    # only; no implicit mono<->stereo broadcasting ever).
     channels_a, channels_b = a.data.shape[1], b.data.shape[1]
-    if channels_a != channels_b:
+    if not channel_count_matches(a, b):
         return _invalid_pair(
             AnalysisStatus.INCOMPATIBLE,
             f'channel mismatch: A has {channels_a} channel(s), '

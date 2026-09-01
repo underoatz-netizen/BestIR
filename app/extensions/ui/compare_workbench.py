@@ -82,6 +82,11 @@ class CompareWorkbench(QDialog):
         self._retired_workers = []
         self._spec_cache = {}
         self._csd_results = {}
+        # B09: A and B CSD results are kept separately; the CSD view renders
+        # only its explicitly selected source (deterministic default A), so
+        # completion order can never decide what the user sees.
+        self._last_csd_a = None
+        self._last_csd_b = None
         self._spec_results = {}
         self._spec_a = None
         self._spec_b = None
@@ -323,6 +328,9 @@ class CompareWorkbench(QDialog):
         self._last_fp_b = None
         self._spec_cache.clear()
         self._csd_results.clear()
+        self._last_csd_a = None
+        self._last_csd_b = None
+        self.csd.reset()   # B09: clear stored A/B and re-default the selector
         self._spec_results.clear()
         self._spec_a = None
         self._spec_b = None
@@ -524,13 +532,17 @@ class CompareWorkbench(QDialog):
         a_first = cache_key.endswith('_a')
         if cache_key.startswith('csd'):
             self._csd_results = getattr(self, '_csd_results', {})
-            self._csd_results['a' if a_first else 'b'] = result
-            ra = self._csd_results.get('a')
-            rb = self._csd_results.get('b')
+            slot = 'a' if a_first else 'b'
+            self._csd_results[slot] = result
+            # B09: store both sources separately and hand the pair to the
+            # view; the view renders only its selected source (default A),
+            # so a late-arriving result never replaces what is displayed.
             if a_first:
-                self.csd.show_csd(result, 'A')
+                self._last_csd_a = result
             else:
-                self.csd.show_csd(result, 'B')
+                self._last_csd_b = result
+            self.csd.set_sources(self._csd_results.get('a'),
+                                 self._csd_results.get('b'))
         else:
             self._spec_results = getattr(self, '_spec_results', {})
             self._spec_results['a' if a_first else 'b'] = result

@@ -96,8 +96,15 @@ def prepare(buffer: AudioBuffer, cfg: PreprocessingConfig) -> PreparedIR:
     tail_end = max(tail_end, onset)
 
     # ---- analysis cap ---------------------------------------------------------
-    max_frames = int(cfg.max_length_ms * sr / 1000)
-    keep_end = min(len(x), max(onset + max_frames, tail_end + rms_win))
+    # The post-onset analysis is capped at `onset + max_frames` so a sustained
+    # tail longer than the cap cannot drag the whole file into memory (long-file
+    # cap, FINAL_REVIEW 2026-08-31). Natural decays that end before the cap keep
+    # their full useful tail; only tails reaching the cap boundary are truncated.
+    max_frames = int(round(cfg.max_length_ms * sr / 1000.0))
+    cap_end = min(len(x), onset + max_frames)
+    if tail_end >= cap_end:
+        warnings.append('signal truncated to max_length_ms')
+    keep_end = min(cap_end, max(onset + max_frames, tail_end + rms_win))
     x = x[:keep_end]
     tail_end = min(tail_end, len(x) - 1)
 

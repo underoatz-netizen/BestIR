@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QScrollArea, QSplitter, QTableWidget,
                                QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
+from .metric_format import (format_cell, format_number, to_display_value,
+                            unit_suffix)
 from .styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_IR_A, COLOR_IR_B,
                           FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY, SURFACE_CARD,
                           SURFACE_RAISED, TEXT_MAIN, TEXT_MUTED)
@@ -54,7 +56,7 @@ class SummaryPanel(QWidget):
 
         self._cards: dict[str, MetricCard] = {}
         for idx, (title, feat, unit) in enumerate(_TOP_CARDS):
-            card = MetricCard(title, unit=unit)
+            card = MetricCard(title, unit=unit, feature=feat)
             row, col = divmod(idx, 3)
             cards_grid.addWidget(card, row, col)
             self._cards[feat] = card
@@ -135,19 +137,24 @@ class SummaryPanel(QWidget):
             fb = fp_b.all_features().get(feat) if fp_b else None
             va = fa.value if fa and fa.valid and fa.value is not None else None
             vb = fb.value if fb and fb.valid and fb.value is not None else None
+            # display-only unit conversion; raw cached values are never altered
+            da = to_display_value(feat, va, unit)
+            db = to_display_value(feat, vb, unit)
             if va is None and vb is None:
                 delta_text = 'n/a'
             elif va is None:
                 delta_text = 'A invalid'
             elif vb is None:
                 delta_text = 'B invalid'
+            elif da is None or db is None:
+                delta_text = 'n/a'   # valid raw but not representable in unit
             else:
-                d = va - vb
-                delta_text = f'{d:+.3f}'
-                diffs.append((abs(d), label, d, va, vb, unit))
+                d = da - db
+                delta_text = format_cell(d, unit, signed=True, sig=3)
+                diffs.append((abs(d), label, d, da, db, unit))
             rows.append((label,
-                         'n/a' if va is None else f'{va:.4g}',
-                         'n/a' if vb is None else f'{vb:.4g}',
+                         'n/a' if da is None else format_cell(da, unit),
+                         'n/a' if db is None else format_cell(db, unit),
                          delta_text,
                          (fa.note if fa and not fa.valid else ''),
                          (fb.note if fb and not fb.valid else '')))
@@ -166,8 +173,10 @@ class SummaryPanel(QWidget):
         # Format Difference Explanation
         diffs.sort(reverse=True)
         lines = []
-        for _, label, d, va, vb, unit in diffs[:6]:
-            u_str = f' {unit}' if unit else ''
+        for _, label, d, da, db, unit in diffs[:6]:
+            u_str = unit_suffix(unit)
             winner = name_a if d > 0 else name_b
-            lines.append(f'• {label}: {winner} is higher by {abs(d):.3g}{u_str} ({va:.4g} vs {vb:.4g})')
+            lines.append(f'• {label}: {winner} is higher by '
+                         f'{format_number(abs(d), unit, sig=3)}{u_str} '
+                         f'({format_number(da, unit)} vs {format_number(db, unit)})')
         self.why.setPlainText('\n\n'.join(lines) or 'No measurable acoustic differences.')

@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..core.analysis import AnalysisResult
+from .channel_policy import valid_channel_aggregate
 from .contracts import (ALGO_VERSION, AnalysisStatus, FeatureValue,
                         ResponseFingerprint)
 from .envelope import compute_envelope
@@ -16,7 +17,13 @@ from .spectrogram import (DEFAULT_NEIGHBOR_BANDS, DEFAULT_PERSISTENCE_BAND,
                           compute_spectrogram)
 from .service import ResponseService
 
-CFG_HASH = 'fp1-guitar-default'
+# fp2: stereo channel policy (power-aggregated magnitude/envelope/CSD/
+# spectrogram + per-channel valid phase aggregation with provenance). Bumped
+# from 'fp1-guitar-default' so fingerprints cached under the OLD policy are
+# never reused: CSD/spectrogram/envelope values changed for stereo inputs and
+# phase features now aggregate ALL valid channels (not just channel 0) and
+# carry a provenance note even for mono.
+CFG_HASH = 'fp2-guitar-default'
 
 
 def compute_fingerprint(record: AnalysisResult, service: ResponseService,
@@ -86,15 +93,24 @@ def compute_fingerprint(record: AnalysisResult, service: ResponseService,
                                        m.get('persistence_q') is not None)
 
     # ---- phase ---------------------------------------------------------------
+    # Channel policy: group-delay scalars aggregate ONLY valid channel evidence
+    # (B11 per-channel masks) — a silent or anti-phase channel never corrupts
+    # another channel's valid bins. The note carries policy provenance
+    # (contributing channels + valid bin count); it is JSON-serialized with the
+    # feature but not surfaced by the Summary UI (notes show only when invalid).
     ph = service.phase(record)
-    gd = ph.group_delay_ms[:, 0] if ph.group_delay_ms is not None else np.array([])
-    valid = (ph.valid_mask[:, 0] & np.isfinite(gd) if len(gd)
-             else np.zeros(0, bool))
-    if valid.any():
-        med = float(np.median(gd[valid]))
-        spread = float(np.percentile(gd[valid], 75) - np.percentile(gd[valid], 25))
-        phase['gd_median_ms'] = FeatureValue(med, True)
-        phase['gd_spread_ms'] = FeatureValue(spread, True)
+    gd = ph.group_delay_ms if ph.group_delay_ms is not None else np.empty((0, 0))
+    valid = (ph.valid_mask & np.isfinite(gd)
+             if gd.size and ph.valid_mask is not None
+             else np.zeros(gd.shape, dtype=bool))
+    med, n_valid, ch_used = valid_channel_aggregate(gd, valid, agg='median')
+    lo, _, _ = valid_channel_aggregate(gd, valid, agg='p25')
+    hi, _, _ = valid_channel_aggregate(gd, valid, agg='p75')
+    if n_valid:
+        # compact channel list: (0,), (0,1) — no spaces, stable in JSON notes
+        provenance = f'valid channels={str(ch_used).replace(" ", "")} bins={n_valid}'
+        phase['gd_median_ms'] = FeatureValue(med, True, provenance)
+        phase['gd_spread_ms'] = FeatureValue(hi - lo, True, provenance)
         phase['gd_valid_coverage'] = FeatureValue(float(ph.coverage), True)
     else:
         phase['gd_median_ms'] = FeatureValue(None, False, 'no valid bins')
