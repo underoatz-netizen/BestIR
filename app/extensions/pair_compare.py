@@ -3,7 +3,7 @@
 Alignment: GCC-PHAT coarse delay + parabolic fractional refinement + explicit
 polarity test. Blend prediction uses COMPLEX responses:
 
-    Hmix(f) = gA * HA(f) + gB * s * HB(f) * exp(-j 2 pi f tau)
+    Hmix(f) = gA * HA(f) + gB * s * HB(f) * exp(+j 2 pi f tau)
 
 and is verified against an actual time-domain aligned sum on reliable bins.
 """
@@ -11,40 +11,46 @@ from __future__ import annotations
 
 import numpy as np
 
-from .contracts import (AnalysisStatus, BlendPrediction, PairComparisonConfig,
-                        PairComparisonResult, PreparedIR)
+from .contracts import (AnalysisStatus, BlendPrediction, CancellationRisk,
+                        PairComparisonConfig, PairComparisonResult, PreparedIR)
+from .pair_preparation import PreparedPair, prepare_pair
+from .processing import blend_gains, blend_sum
 from .time_frequency import next_pow2
 
 
 def compare_pair(a: PreparedIR, b: PreparedIR, cfg: PairComparisonConfig
-                 ) -> PairComparisonResult:
-    if a.status != AnalysisStatus.OK or b.status != AnalysisStatus.OK:
-        st = (AnalysisStatus.TOO_SHORT if AnalysisStatus.TOO_SHORT in
-              (a.status, b.status) else a.status)
-        return PairComparisonResult(key_a=a.key, key_b=b.key, cfg=cfg,
-                                    status=st,
-                                    warnings=tuple(a.warnings) +
-                                    tuple(b.warnings))
-    sr = a.sample_rate
-    xa = _mono(a)
-    xb = _mono(b)
+                  ) -> PairComparisonResult:
+    prepared = prepare_pair(a, b)
+    if prepared.status != AnalysisStatus.OK:
+        return _invalid_pair_result(a, b, cfg, prepared)
+    sr = prepared.sample_rate
+    xa = _mono(prepared.data_a)
+    xb = _mono(prepared.data_b)
 
-    delay, confidence = _estimate_delay(xa, xb, sr, cfg)
+    total_delay, confidence = _estimate_delay(xa, xb, sr, cfg)
     polarity = _estimate_polarity(xa, xb, sr, cfg)
+    onset_delay = prepared.onset_delay_samples
+    residual_delay = total_delay - onset_delay
 
-    # magnitude-weighted phase difference on onset-aligned windows
+    # Full buffers retain each source's independent leading-silence timing.
     nfft = next_pow2(max(len(xa), len(xb), 4096))
-    HA, HB = _spectra(a, b, sr, nfft)
+    HA, HB = _spectra(xa, xb, nfft)
     diff_deg, valid_fraction = _phase_diff_weighted(HA, HB, cfg, sr)
     return PairComparisonResult(
         key_a=a.key, key_b=b.key, cfg=cfg, status=AnalysisStatus.OK,
-        delay_samples=float(delay),
-        delay_ms=float(delay / sr * 1000.0),
+        warnings=prepared.warnings,
+        delay_samples=float(total_delay),
+        delay_ms=float(total_delay / sr * 1000.0),
         polarity=int(polarity),
         correlation_confidence=float(confidence),
         phase_diff_weighted_rms_deg=float(diff_deg),
         gd_median_diff_ms=None,
         valid_fraction=float(valid_fraction),
+        onset_delay_samples=float(onset_delay),
+        residual_delay_samples=float(residual_delay),
+        source_sample_rate_a=prepared.source_sample_rate_a,
+        source_sample_rate_b=prepared.source_sample_rate_b,
+        analysis_sample_rate=prepared.sample_rate,
     )
 
 
@@ -57,31 +63,44 @@ def predict_blend(a: PreparedIR, b: PreparedIR, cfg: PairComparisonConfig,
     alignment: 'raw' uses the files' native timing, 'onset' aligns onsets,
     'suggested' uses the measured delay/polarity from cross-correlation.
     """
-    if a.status != AnalysisStatus.OK or b.status != AnalysisStatus.OK:
-        st = (AnalysisStatus.TOO_SHORT if AnalysisStatus.TOO_SHORT in
-              (a.status, b.status) else a.status)
-        return BlendPrediction(key_a=a.key, key_b=b.key, cfg=cfg, status=st,
-                               warnings=tuple(a.warnings) + tuple(b.warnings))
-    sr = a.sample_rate
+    prepared = prepare_pair(a, b)
+    if prepared.status != AnalysisStatus.OK:
+        return _invalid_blend_prediction(a, b, cfg, prepared, alignment)
+    sr = prepared.sample_rate
+    onset_component = 0.0
+    residual_component = 0.0
     if alignment == 'raw':
         tau = 0.0
         s = 1
     elif alignment == 'onset':
-        tau = 0.0
+        tau = prepared.onset_delay_samples
         s = 1
+        onset_component = tau
     else:
         pair = compare_pair(a, b, cfg)
+        if pair.status != AnalysisStatus.OK:
+            return BlendPrediction(
+                key_a=a.key, key_b=b.key, cfg=cfg, status=pair.status,
+                warnings=pair.warnings, alignment=alignment,
+                source_sample_rate_a=prepared.source_sample_rate_a,
+                source_sample_rate_b=prepared.source_sample_rate_b,
+                analysis_sample_rate=prepared.sample_rate,
+                reason=pair.reason,
+            )
         tau = pair.delay_samples
         s = pair.polarity if pair.polarity != 0 else 1
+        onset_component = pair.onset_delay_samples
+        residual_component = pair.residual_delay_samples
     if delay_samples is not None:
         tau = float(delay_samples)
+        residual_component = tau - onset_component
     if polarity is not None:
         s = int(polarity)
     s = 1 if s == 0 else s
 
-    xa = _mono(a)
-    xb = _mono(b)
-    nfft = next_pow2(len(xa) + len(xb) + int(abs(tau)) + 8)
+    xa = _mono(prepared.data_a)
+    xb = _mono(prepared.data_b)
+    nfft = next_pow2(len(xa) + len(xb) + int(np.ceil(abs(tau))) + 8)
     HA = np.fft.rfft(xa, nfft)
     HB = np.fft.rfft(xb, nfft)
     freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
@@ -95,27 +114,51 @@ def predict_blend(a: PreparedIR, b: PreparedIR, cfg: PairComparisonConfig,
 
     ratios = tuple(cfg.blend_ratios)
     mix_db = np.empty((len(ratios), len(freqs)))
+    risk_by_ratio = {}
+    expectation_db = []
+    # Positive delay means B arrives later, so prediction advances it.
+    phase_ramp = np.exp(2j * np.pi * freqs * tau / sr)
     for i, r in enumerate(ratios):
-        gA, gB = 1.0 - 0.0, 1.0
-        mix = gA * HA + (r * gB) * s * HB * np.exp(-2j * np.pi * freqs * tau / sr)
+        ratio = float(r)
+        gA, gB = blend_gains(ratio)
+        mix = gA * HA + gB * s * HB * phase_ramp
         mix_db[i] = 20 * np.log10(np.maximum(np.abs(mix), 1e-30))
+        expect_db = 10 * np.log10(np.maximum(
+            np.abs(gA * HA) ** 2 + np.abs(gB * HB) ** 2, 1e-30))
+        expectation_db.append(expect_db)
+        deficit = expect_db - mix_db[i]
+        if reliable.any():
+            worst_i = int(np.argmax(np.where(reliable, deficit, -np.inf)))
+            worst_dev = max(float(deficit[worst_i]), 0.0)
+            worst_freq = float(freqs[worst_i])
+            notches = tuple(float(f) for f in freqs[reliable & (deficit > 6.0)])
+            sensitivity = {}
+            for tag, off in (('-1', -1.0), ('+1', +1.0)):
+                offset_mix = gA * HA + gB * s * HB * np.exp(
+                    2j * np.pi * freqs * (tau + off) / sr)
+                offset_db = 20 * np.log10(np.maximum(np.abs(offset_mix), 1e-30))
+                sensitivity[tag] = max(
+                    float((expect_db - offset_db)[reliable].max()), 0.0)
+        else:
+            worst_dev, worst_freq, notches = None, None, ()
+            sensitivity = {'-1': None, '+1': None}
+        risk_by_ratio[ratio] = CancellationRisk(
+            worst_cancellation_db=worst_dev,
+            worst_cancellation_freq=worst_freq,
+            notch_freqs=notches,
+            sensitivity=sensitivity,
+        )
 
-    # comb risk on the 50/50 mix within the band: cancellation = deficit below
-    # the incoherent power-sum expectation (constructive addition => 0)
+    # Compatibility summary: retain the configured ratio nearest 50% B.
     mid_i = int(np.argmin(np.abs(np.asarray(ratios) - 0.5)))
     mid = mix_db[mid_i]
-    expect_db = 10 * np.log10(np.maximum(
-        np.abs(HA) ** 2 + (ratios[mid_i] ** 2) * np.abs(HB) ** 2, 1e-30))
-    deficit = expect_db - mid
+    expect_db = expectation_db[mid_i]
+    reference_risk = risk_by_ratio[float(ratios[mid_i])]
     if reliable.any():
-        worst_dev = float(deficit[reliable].max())
-        worst_dev = max(worst_dev, 0.0)
-        worst_freq = float(freqs[np.argmax(np.where(reliable, deficit, -np.inf))])
-        notches = tuple(float(f) for f in freqs[reliable & (deficit > 6.0)])
         rms_dev = float(np.sqrt(np.mean(
             np.abs(mid - expect_db)[reliable] ** 2)))
     else:
-        worst_dev, worst_freq, notches, rms_dev = None, None, (), None
+        rms_dev = None
 
     # magnitude-weighted phase compatibility on reliable bins
     dphi = np.angle(np.exp(1j * (np.angle(HA) - np.angle(HB)
@@ -126,37 +169,65 @@ def predict_blend(a: PreparedIR, b: PreparedIR, cfg: PairComparisonConfig,
     compat = float(1.0 - np.sqrt(np.mean((w * dphi) ** 2)) / np.pi) \
         if w.sum() > 0 else None
 
-    # sensitivity to +/- one sample (worst cancellation deficit)
-    sens = {}
-    for tag, off in (('-1', -1.0), ('+1', +1.0)):
-        mixs = HA + (ratios[mid_i]) * s * HB * np.exp(
-            -2j * np.pi * freqs * (tau + off) / sr)
-        mids = 20 * np.log10(np.maximum(np.abs(mixs), 1e-30))
-        deficits = expect_db - mids
-        sens[tag] = (float(deficits[reliable].max()) if reliable.any() else None)
-
     # verification against an actual aligned time-domain sum
-    verified = _verify_against_time_domain(xa, xb, tau, s, ratios[mid_i],
-                                           freqs, mix_db[mid_i], reliable, sr,
-                                           nfft)
+    verified = _verify_against_time_domain(a, b, cfg, tau, s, ratios[mid_i],
+                                            mix_db[mid_i], reliable, nfft)
 
-    warnings = []
-    if worst_dev is not None and worst_dev > 12.0:
-        warnings.append(f'severe comb cancellation: -{worst_dev:.1f} dB at '
-                        f'{worst_freq:.0f} Hz')
+    warnings = list(prepared.warnings)
+    if (reference_risk.worst_cancellation_db is not None and
+            reference_risk.worst_cancellation_db > 12.0):
+        warnings.append(
+            f'severe comb cancellation: '
+            f'-{reference_risk.worst_cancellation_db:.1f} dB at '
+            f'{reference_risk.worst_cancellation_freq:.0f} Hz')
     return BlendPrediction(
         key_a=a.key, key_b=b.key, cfg=cfg, status=AnalysisStatus.OK,
         warnings=tuple(warnings), freqs=freqs, magnitude_db=mix_db,
         ratios=ratios, delay_samples=float(tau), polarity=int(s),
-        alignment=alignment, worst_cancellation_db=worst_dev,
-        worst_cancellation_freq=worst_freq, notch_freqs=notches,
+        alignment=alignment,
+        worst_cancellation_db=reference_risk.worst_cancellation_db,
+        worst_cancellation_freq=reference_risk.worst_cancellation_freq,
+        notch_freqs=reference_risk.notch_freqs,
         rms_deviation_db=rms_dev, phase_compat_score=compat,
-        sensitivity=sens, verified_rms_db=verified)
+        sensitivity=dict(reference_risk.sensitivity), verified_rms_db=verified,
+        risk_by_ratio=risk_by_ratio,
+        onset_delay_samples=float(onset_component),
+        residual_delay_samples=float(residual_component),
+        source_sample_rate_a=prepared.source_sample_rate_a,
+        source_sample_rate_b=prepared.source_sample_rate_b,
+        analysis_sample_rate=prepared.sample_rate)
 
 
 # ---- internals -----------------------------------------------------------------
-def _mono(p: PreparedIR) -> np.ndarray:
-    return p.data.mean(axis=1)[p.onset:p.tail_end + 1]
+def _invalid_pair_result(a: PreparedIR, b: PreparedIR,
+                         cfg: PairComparisonConfig,
+                         prepared: PreparedPair) -> PairComparisonResult:
+    return PairComparisonResult(
+        key_a=a.key, key_b=b.key, cfg=cfg, status=prepared.status,
+        warnings=prepared.warnings,
+        source_sample_rate_a=prepared.source_sample_rate_a,
+        source_sample_rate_b=prepared.source_sample_rate_b,
+        analysis_sample_rate=prepared.sample_rate,
+        reason=prepared.reason,
+    )
+
+
+def _invalid_blend_prediction(a: PreparedIR, b: PreparedIR,
+                              cfg: PairComparisonConfig,
+                              prepared: PreparedPair,
+                              alignment: str) -> BlendPrediction:
+    return BlendPrediction(
+        key_a=a.key, key_b=b.key, cfg=cfg, status=prepared.status,
+        warnings=prepared.warnings, alignment=alignment,
+        source_sample_rate_a=prepared.source_sample_rate_a,
+        source_sample_rate_b=prepared.source_sample_rate_b,
+        analysis_sample_rate=prepared.sample_rate,
+        reason=prepared.reason,
+    )
+
+
+def _mono(data: np.ndarray) -> np.ndarray:
+    return data.mean(axis=1)
 
 
 def _estimate_delay(xa: np.ndarray, xb: np.ndarray, sr: int,
@@ -230,12 +301,11 @@ def _estimate_polarity(xa: np.ndarray, xb: np.ndarray, sr: int,
     return 1 if cc[k] >= 0 else -1
 
 
-def _spectra(a: PreparedIR, b: PreparedIR, sr: int, nfft: int):
-    def spec_of(p):
-        x = _mono(p)
+def _spectra(xa: np.ndarray, xb: np.ndarray, nfft: int):
+    def spec_of(x):
         w = np.hanning(len(x)) if len(x) > 8 else 1.0
         return np.fft.rfft(x * w, nfft)
-    return spec_of(a), spec_of(b)
+    return spec_of(xa), spec_of(xb)
 
 
 def _phase_diff_weighted(HA: np.ndarray, HB: np.ndarray,
@@ -254,19 +324,23 @@ def _phase_diff_weighted(HA: np.ndarray, HB: np.ndarray,
     w = w / (w.max() + 1e-30)
     wrms = float(np.sqrt(np.sum(w[reliable] * dphi[reliable] ** 2) /
                          (np.sum(w[reliable]) + 1e-30)))
-    deg = float(np.degrees(np.sqrt(wrms)))
+    # single square root: wrms is already the weighted radians RMS (B10)
+    deg = float(np.degrees(wrms))
     return deg, float(reliable.sum() / max(1, band.sum()))
 
 
-def _verify_against_time_domain(xa: np.ndarray, xb: np.ndarray, tau: float,
-                                s: int, ratio: float, freqs: np.ndarray,
-                                predicted_db: np.ndarray, reliable: np.ndarray,
-                                sr: int, nfft: int) -> float | None:
+def _verify_against_time_domain(a: PreparedIR, b: PreparedIR,
+                                cfg: PairComparisonConfig, tau: float, s: int,
+                                ratio: float, predicted_db: np.ndarray,
+                                reliable: np.ndarray, nfft: int) -> float | None:
     if not reliable.any():
         return None
-    HA = np.fft.rfft(xa, nfft)
-    HB = np.fft.rfft(xb, nfft)
-    mix = HA + ratio * s * HB * np.exp(-2j * np.pi * freqs * tau / sr)
-    ref_db = 20 * np.log10(np.maximum(np.abs(mix), 1e-30))
+    pair = PairComparisonResult(
+        key_a=a.key, key_b=b.key, cfg=cfg, status=AnalysisStatus.OK,
+        delay_samples=float(tau), polarity=int(s),
+    )
+    mix, _, _ = blend_sum(a, b, pair, ratio)
+    mono_mix = mix.mean(axis=1)
+    ref_db = 20 * np.log10(np.maximum(np.abs(np.fft.rfft(mono_mix, nfft)), 1e-30))
     return float(np.sqrt(np.mean((predicted_db[reliable] -
                                   ref_db[reliable]) ** 2)))

@@ -56,13 +56,14 @@ class PairAnalysisWorker(QThread):
     current_id = 0
 
     def __init__(self, service, rec_a: AnalysisResult, rec_b: AnalysisResult,
-                 parent=None):
+                 parent=None, cfg=None):
         super().__init__(parent)
         PairAnalysisWorker.current_id += 1
         self.request_id = PairAnalysisWorker.current_id
         self._service = service
         self._a = rec_a
         self._b = rec_b
+        self._cfg = cfg
         self._cancelled = False
 
     def cancel(self):
@@ -78,7 +79,7 @@ class PairAnalysisWorker(QThread):
             prep_b = self._service.prepared(self._b)
             if self._cancelled:
                 return
-            cfg = PairComparisonConfig()
+            cfg = self._cfg or PairComparisonConfig()
             pair = compare_pair(prep_a, prep_b, cfg)
             if self._cancelled:
                 return

@@ -4,6 +4,8 @@ Enhanced with Boro UI design tokens, tactile blend slider, and comb-risk warning
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Signal, Qt
@@ -12,6 +14,8 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QPushButton, QSlider, QTextEdit,
                                QVBoxLayout, QWidget)
 
+from app.extensions.contracts import AnalysisStatus
+
 from .styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_DIFF, COLOR_IR_A,
                           COLOR_IR_B, FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY,
                           SURFACE_CARD, SURFACE_RAISED, TEXT_MAIN, TEXT_MUTED)
@@ -19,6 +23,49 @@ from .widgets.validity_chip import ValidityChip
 
 _TICKS = [(100, '100'), (200, '200'), (500, '500'), (1000, '1k'), (2000, '2k'),
           (5000, '5k'), (10000, '10k')]
+
+
+def _result_is_ok(result) -> bool:
+    return result is not None and getattr(result, 'status', None) == AnalysisStatus.OK
+
+
+def _blend_is_renderable(blend) -> bool:
+    if not _result_is_ok(blend):
+        return False
+    if (getattr(blend, 'freqs', None) is None or
+            getattr(blend, 'magnitude_db', None) is None or
+            getattr(blend, 'ratios', None) is None):
+        return False
+    try:
+        freqs = np.asarray(blend.freqs, dtype=float)
+        magnitude = np.asarray(blend.magnitude_db, dtype=float)
+        ratios = np.asarray(blend.ratios, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return (freqs.ndim == 1 and freqs.size > 0 and
+            ratios.ndim == 1 and ratios.size > 0 and
+            magnitude.ndim == 2 and
+            magnitude.shape == (ratios.size, freqs.size) and
+            np.all(np.isfinite(freqs)) and np.all(freqs >= 0) and
+            np.all(np.isfinite(magnitude)) and np.all(np.isfinite(ratios)))
+
+
+def _unavailable_reason(pair, blend) -> str:
+    for name, result in (('pair result', pair), ('blend result', blend)):
+        if not _result_is_ok(result):
+            reason = str(getattr(result, 'reason', '') or '').strip()
+            if reason:
+                return f'No data: {reason}'
+            status = getattr(getattr(result, 'status', None), 'value',
+                             getattr(result, 'status', None))
+            return f'No data: {name} is {status or "unavailable"}'
+    return 'No data: blend result is malformed'
+
+
+def _risk_value(risk, name, default=None):
+    if isinstance(risk, Mapping):
+        return risk.get(name, default)
+    return getattr(risk, name, default)
 
 
 class PhaseBlendView(QWidget):
@@ -77,7 +124,7 @@ class PhaseBlendView(QWidget):
         """)
         c_lay.addWidget(self.ratio_label)
 
-        self.comb_chip = ValidityChip(text='Comb Risk: Low', state='valid')
+        self.comb_chip = ValidityChip(text='Comb Risk: No data', state='invalid')
         c_lay.addWidget(self.comb_chip)
 
         self.info = QTextEdit()
@@ -154,11 +201,16 @@ class PhaseBlendView(QWidget):
         self._phase.clear()
         self._gd.clear()
         self._cache_a, self._cache_b, self._pair_result = phase_a, phase_b, pair_result
+        if not _result_is_ok(pair_result):
+            self._blend_result = None
+            self._show_blend_unavailable(pair_result, None)
+            return
         for ph, color, name in ((phase_a, COLOR_IR_A, 'IR A'), (phase_b, COLOR_IR_B, 'IR B')):
             if ph is None or ph.phase_rad is None:
                 continue
             lx = self._lx(ph.freqs)
-            valid = ph.valid_mask
+            # per-channel validity (B11); the plot currently shows channel 0
+            valid = ph.valid_mask[:, 0]
             self._phase.plot(x=lx[valid], y=ph.phase_rad[valid, 0],
                              pen=pg.mkPen(QColor(color), width=1.5), name=name)
             self._gd.plot(x=lx[valid], y=ph.group_delay_ms[valid, 0],
@@ -167,6 +219,10 @@ class PhaseBlendView(QWidget):
 
     def show_blend(self, pair_result, blend_result):
         self._pair_result = pair_result
+        if not _result_is_ok(pair_result) or not _blend_is_renderable(blend_result):
+            self._blend_result = None
+            self._show_blend_unavailable(pair_result, blend_result)
+            return
         self._blend_result = blend_result
         self._update_blend_plot()
         self._update_info()
@@ -179,56 +235,98 @@ class PhaseBlendView(QWidget):
         idx = int(round(pct / 100.0 * (len(blend.ratios) - 1)))
         return float(blend.ratios[idx])
 
+    def _active_risk(self, blend):
+        risk_by_ratio = getattr(blend, 'risk_by_ratio', None)
+        if not isinstance(risk_by_ratio, Mapping):
+            return None
+        return risk_by_ratio.get(self.current_ratio_b())
+
     def set_export_enabled(self, enabled: bool):
         for b in (self.btn_export_b, self.btn_export_blend, self.btn_export_report):
             b.setEnabled(enabled)
 
     def _update_blend_plot(self):
         blend = self._blend_result
-        if blend is None or blend.magnitude_db is None:
+        self._blend.clear()
+        if not _blend_is_renderable(blend):
             return
         pct = self.ratio_slider.value()
         idx = int(round(pct / 100.0 * (len(blend.ratios) - 1)))
         self.ratio_label.setText(f'Blend: {int(blend.ratios[idx] * 100)}% B')
-        self._blend.clear()
         lx = self._lx(blend.freqs)
         self._blend.plot(x=lx, y=blend.magnitude_db[idx],
                          pen=pg.mkPen(QColor(ACCENT_GOLD), width=2.5))
-        for f in blend.notch_freqs[:8]:
+        risk = self._active_risk(blend)
+        for f in _risk_value(risk, 'notch_freqs', ())[:8]:
             line = pg.InfiniteLine(pos=float(np.log10(max(f, 1e-2))), angle=90,
                                    pen=pg.mkPen(QColor(COLOR_DIFF), width=1.5,
                                                 style=Qt.DashLine))
             self._blend.addItem(line)
+        self._update_info()
+
+    def _show_blend_unavailable(self, pair, blend):
+        reason = _unavailable_reason(pair, blend)
+        self._blend.clear()
+        self.ratio_label.setText('Blend: No data')
+        self.comb_chip.set_state('invalid', 'Comb Risk: No data', reason)
+        self.info.setPlainText(reason)
 
     def _update_info(self):
         pair, blend = self._pair_result, self._blend_result
-        if pair is None:
+        if not _result_is_ok(pair):
+            self._show_blend_unavailable(pair, blend)
+            return
+        if blend is not None and not _blend_is_renderable(blend):
+            self._show_blend_unavailable(pair, blend)
             return
         lines = [f"* Suggested Alignment: delay {pair.delay_ms:+.2f} ms "
                  f"({pair.delay_samples:+.2f} samples), "
                  f"Polarity: {'Normal (+)' if pair.polarity > 0 else 'INVERTED (-)'}, "
                  f"Correlation Confidence: {pair.correlation_confidence:.2f}"]
         if blend is not None:
-            if blend.worst_cancellation_db is not None:
+            ratio = self.current_ratio_b()
+            ratio_text = f'{int(ratio * 100)}% B blend'
+            risk = self._active_risk(blend)
+            try:
+                loss = float(_risk_value(risk, 'worst_cancellation_db'))
+            except (TypeError, ValueError):
+                loss = None
+            if loss is not None and np.isfinite(loss):
+                freq = _risk_value(risk, 'worst_cancellation_freq')
+                freq_text = f'at {float(freq):.0f} Hz ' if freq is not None else ''
                 lines.append(
-                    f'• Worst Notch Cancellation: {blend.worst_cancellation_db:.1f} dB '
-                    f'at {blend.worst_cancellation_freq:.0f} Hz (50/50 blend)')
-                if blend.worst_cancellation_db < -6.0:
+                    f'• Worst Notch Cancellation: {loss:.1f} dB {freq_text}'
+                    f'({ratio_text})')
+                if loss >= 6.0:
                     self.comb_chip.set_state('error', 'Comb Risk: High',
-                                             f'Cancellation of {blend.worst_cancellation_db:.1f} dB at {blend.worst_cancellation_freq:.0f} Hz')
-                elif blend.worst_cancellation_db < -3.0:
+                                              f'Cancellation loss of {loss:.1f} dB '
+                                              f'for {ratio_text}')
+                elif loss >= 3.0:
                     self.comb_chip.set_state('warn', 'Comb Risk: Medium',
-                                             f'Cancellation of {blend.worst_cancellation_db:.1f} dB')
+                                              f'Cancellation loss of {loss:.1f} dB '
+                                              f'for {ratio_text}')
                 else:
-                    self.comb_chip.set_state('valid', 'Comb Risk: Safe', 'Minimal phase cancellation')
+                    self.comb_chip.set_state('valid', 'Comb Risk: Safe',
+                                              f'Minimal phase cancellation for {ratio_text}')
+            else:
+                self.comb_chip.set_state('invalid', 'Comb Risk: No data',
+                                         f'No reliable cancellation data for {ratio_text}')
+                lines.append(f'• Worst Notch Cancellation: No reliable data '
+                             f'({ratio_text})')
             if blend.rms_deviation_db is not None:
                 lines.append(f'• RMS Deviation from Power-Sum Expectation: '
                              f'{blend.rms_deviation_db:.2f} dB')
             if blend.phase_compat_score is not None:
                 lines.append(f'• Phase Compatibility Score: '
                              f'{blend.phase_compat_score:.2f} / 1.00')
-            if blend.sensitivity:
-                s = ', '.join(f'{k}: {v:.1f} dB' for k, v in
-                              blend.sensitivity.items() if v is not None)
-                lines.append(f'• Sensitivity to ±1 Sample Offset: {s}')
+            sensitivity = _risk_value(risk, 'sensitivity', {})
+            if isinstance(sensitivity, Mapping):
+                s = ', '.join(f'{tag}: {value:.1f} dB' for tag in ('-1', '+1')
+                              if (value := sensitivity.get(tag)) is not None)
+                if s:
+                    lines.append(f'• Sensitivity to +/-1 Sample Offset '
+                                 f'({ratio_text}): {s}')
+                else:
+                    lines.append(f'• Sensitivity to +/-1 Sample Offset '
+                                 f'({ratio_text}): No reliable data')
         self.info.setPlainText('\n'.join(lines))

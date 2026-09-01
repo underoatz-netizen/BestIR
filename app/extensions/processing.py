@@ -9,20 +9,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from .contracts import (AnalysisStatus, BlendPrediction, IRProcessingConfig,
-                        PairComparisonResult, PreparedIR)
+from .contracts import (AnalysisStatus, IRProcessingConfig, PairComparisonResult,
+                        PreparedIR)
+from .pair_preparation import prepare_pair
 from .time_frequency import next_pow2
 
 
-def fractional_shift(x: np.ndarray, advance_samples: float) -> np.ndarray:
+def fractional_shift(x: np.ndarray, advance_samples: float,
+                     output_frames: int | None = None) -> np.ndarray:
     """Advance `x` by `advance_samples` (linear shift, zero-padded FFT).
 
-    Works on (n,) or (n, ch) float arrays; output keeps the input shape.
+    Works on (n,) or (n, ch) float arrays.  By default output keeps the input
+    shape; ``output_frames`` retains delayed tails for pair blending.
     """
     n = len(x)
+    out_n = n if output_frames is None else max(n, int(output_frames))
     if abs(advance_samples) < 1e-9:
-        return x.copy()
-    pad = next_pow2(n + int(abs(advance_samples)) + 8)
+        out = np.zeros((out_n,) + x.shape[1:], dtype=x.dtype)
+        out[:n] = x
+        return out
+    pad = next_pow2(out_n + int(np.ceil(abs(advance_samples))) + 8)
     xp = np.zeros_like(x, shape=(pad,) + x.shape[1:])
     xp[:n] = x
     X = np.fft.rfft(xp, axis=0)
@@ -30,7 +36,7 @@ def fractional_shift(x: np.ndarray, advance_samples: float) -> np.ndarray:
     ramp = np.exp(2j * np.pi * f * advance_samples)
     if x.ndim > 1:
         ramp = ramp[:, None]
-    ys = np.fft.irfft(X * ramp, pad, axis=0)[:n]
+    ys = np.fft.irfft(X * ramp, pad, axis=0)[:out_n]
     return ys
 
 
@@ -56,6 +62,11 @@ def apply_alignment(prepared: PreparedIR, cfg: IRProcessingConfig
     return x, warnings
 
 
+def blend_gains(ratio_b: float) -> tuple[float, float]:
+    """Return the documented linear crossfade gains for A and B."""
+    return 1.0 - ratio_b, ratio_b
+
+
 def blend_sum(a: PreparedIR, b: PreparedIR,
               pair: PairComparisonResult, ratio_b: float,
               cfg: IRProcessingConfig | None = None) -> tuple[np.ndarray, int, list[str]]:
@@ -63,26 +74,19 @@ def blend_sum(a: PreparedIR, b: PreparedIR,
 
     Uses the measured pair alignment. Returns (mix (n, ch), sr, warnings).
     """
-    if a.status != AnalysisStatus.OK or b.status != AnalysisStatus.OK:
-        raise ValueError('both IRs must analyze cleanly before blending')
-    sr = a.sample_rate
-    ch = max(a.channels, b.channels)
-    advance = pair.delay_samples
+    prepared = prepare_pair(a, b)
+    if prepared.status != AnalysisStatus.OK:
+        raise ValueError(prepared.reason or 'both IRs must analyze cleanly before blending')
+    sr = prepared.sample_rate
+    advance = float(pair.delay_samples)
     s = pair.polarity if pair.polarity != 0 else 1
-    b_cfg = IRProcessingConfig(delay_samples=advance, polarity=s)
-    xbc, _ = apply_alignment(b, b_cfg)
-
-    n = max(a.frames, len(xbc)) + int(abs(advance)) + 8
-    A = np.zeros((n, a.channels))
-    A[:a.frames] = a.data
-    B = np.zeros((n, b.channels))
-    B[:len(xbc)] = xbc
-    if B.shape[1] < ch:
-        B = np.tile(B, (1, ch))[:, :ch]
-    if A.shape[1] < ch:
-        A = np.tile(A, (1, ch))[:, :ch]
-    gA, gB = 1.0 - ratio_b, ratio_b
-    mix = gA * A + gB * B
-    warnings = []
+    n = max(len(prepared.data_a), len(prepared.data_b)) + \
+        int(np.ceil(abs(advance))) + 8
+    A = np.zeros((n, prepared.data_a.shape[1]))
+    A[:len(prepared.data_a)] = prepared.data_a
+    B = fractional_shift(prepared.data_b, advance, output_frames=n)
+    gA, gB = blend_gains(ratio_b)
+    mix = gA * A + gB * s * B
+    warnings = list(prepared.warnings)
     _ = cfg
     return mix, sr, warnings

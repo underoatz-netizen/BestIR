@@ -13,12 +13,18 @@ Enhanced with Boro UI Design System:
 """
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
+
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton,
                                QTabWidget, QVBoxLayout, QWidget)
 
 from app.core.analysis import AnalysisResult
+from app.extensions.contracts import (AnalysisStatus, PairComparisonConfig,
+                                      SourceKey, TimeFrequencyConfig,
+                                      config_hash)
 from app.extensions.service import ResponseService
 from .csd_view import CsdView
 from .phase_blend_view import PhaseBlendView
@@ -37,6 +43,20 @@ def _short(path: str) -> str:
     return path.replace('\\', '/').rsplit('/', 1)[-1]
 
 
+@dataclass(frozen=True)
+class _SelectionContext:
+    """Immutable A/B and analysis-config snapshot for asynchronous work."""
+
+    generation: int
+    a_path: str | None
+    b_path: str | None
+    a_key: SourceKey | None
+    b_key: SourceKey | None
+    pair_cfg: PairComparisonConfig
+    tf_cfg: TimeFrequencyConfig
+    config_hash: str
+
+
 class CompareWorkbench(QDialog):
     """Modeless compare dialog owned by ExtendedMainWindow."""
 
@@ -50,12 +70,19 @@ class CompareWorkbench(QDialog):
 
         self.rec_a: AnalysisResult | None = None
         self.rec_b: AnalysisResult | None = None
+        self._selection_generation = 0
+        self._selection_context: _SelectionContext | None = None
         self._pair_worker = None
         self._pair_request_id: int | None = None
         self._last_pair = None
         self._last_blend = None
         self._spec_workers = {}
+        self._retired_workers = []
         self._spec_cache = {}
+        self._csd_results = {}
+        self._spec_results = {}
+        self._spec_a = None
+        self._spec_b = None
 
         # Boro A/B Header Deck
         self.deck = ABHeaderDeck(self)
@@ -75,6 +102,7 @@ class CompareWorkbench(QDialog):
         self.csd = CsdView()
         self.spectrogram = SpectrogramView()
         self.phase_blend = PhaseBlendView()
+        self.phase_blend.set_export_enabled(False)
         self.search = ResponseSearchPanel(self)
         self.search.rank_requested.connect(self._run_response_search)
 
@@ -170,8 +198,126 @@ class CompareWorkbench(QDialog):
             return recs[0] if recs else None
         return None
 
+    @staticmethod
+    def _normalized_path(path: str | None) -> str | None:
+        if not path:
+            return None
+        return os.path.normcase(os.path.abspath(path))
+
+    def _source_key_for(self, rec: AnalysisResult | None) -> SourceKey | None:
+        if rec is None:
+            return None
+        try:
+            stat = os.stat(rec.path)
+        except OSError:
+            return None
+        return SourceKey(path=os.path.abspath(rec.path),
+                         mtime_ns=stat.st_mtime_ns,
+                         size=stat.st_size,
+                         sample_rate=rec.sample_rate,
+                         channels=rec.channels)
+
+    def _capture_selection_context(self) -> _SelectionContext:
+        pair_cfg = PairComparisonConfig()
+        tf_cfg = TimeFrequencyConfig(profile='balanced')
+        return _SelectionContext(
+            generation=self._selection_generation,
+            a_path=self._normalized_path(
+                None if self.rec_a is None else self.rec_a.path),
+            b_path=self._normalized_path(
+                None if self.rec_b is None else self.rec_b.path),
+            a_key=self._source_key_for(self.rec_a),
+            b_key=self._source_key_for(self.rec_b),
+            pair_cfg=pair_cfg,
+            tf_cfg=tf_cfg,
+            config_hash=config_hash({'pair': pair_cfg, 'time_frequency': tf_cfg}),
+        )
+
+    def _context_is_current(self, context: _SelectionContext | None) -> bool:
+        return context is not None and context is self._selection_context
+
+    def _record_matches_context(self, rec: AnalysisResult,
+                                cache_key: str,
+                                context: _SelectionContext) -> bool:
+        expected_path = (context.a_path if cache_key.endswith('_a')
+                         else context.b_path)
+        return self._normalized_path(rec.path) == expected_path
+
+    def _key_matches_context(self, key: SourceKey | None, slot: str,
+                             context: _SelectionContext) -> bool:
+        expected_path = context.a_path if slot == 'a' else context.b_path
+        expected_key = context.a_key if slot == 'a' else context.b_key
+        if key is None or self._normalized_path(key.path) != expected_path:
+            return False
+        return expected_key is None or key == expected_key
+
+    @staticmethod
+    def _result_config_hash(result) -> str | None:
+        cfg = getattr(result, 'cfg', None)
+        getter = getattr(cfg, 'config_hash', None)
+        return getter() if callable(getter) else None
+
+    def _pair_results_match_context(self, pair, blend,
+                                    context: _SelectionContext) -> bool:
+        expected_hash = context.pair_cfg.config_hash()
+        return (
+            self._key_matches_context(getattr(pair, 'key_a', None), 'a', context)
+            and self._key_matches_context(getattr(pair, 'key_b', None), 'b', context)
+            and self._key_matches_context(getattr(blend, 'key_a', None), 'a', context)
+            and self._key_matches_context(getattr(blend, 'key_b', None), 'b', context)
+            and self._result_config_hash(pair) == expected_hash
+            and self._result_config_hash(blend) == expected_hash
+        )
+
+    def _spec_result_matches_context(self, cache_key: str, result,
+                                     context: _SelectionContext) -> bool:
+        slot = 'a' if cache_key.endswith('_a') else 'b'
+        return (
+            self._key_matches_context(getattr(result, 'key', None), slot, context)
+            and self._result_config_hash(result) == context.tf_cfg.config_hash()
+        )
+
+    @staticmethod
+    def _cancel_worker(worker) -> None:
+        cancel = getattr(worker, 'cancel', None)
+        if callable(cancel):
+            cancel()
+
+    def _retire_worker(self, worker) -> None:
+        if worker is None:
+            return
+        if worker not in self._retired_workers:
+            self._retired_workers.append(worker)
+            finished = getattr(worker, 'finished', None)
+            if finished is not None:
+                finished.connect(
+                    lambda retired=worker: self._retired_workers.remove(retired)
+                    if retired in self._retired_workers else None)
+        self._cancel_worker(worker)
+
     def _invalidate(self):
+        self._selection_generation += 1
+        self._selection_context = self._capture_selection_context()
+        self._debounce.stop()
+
+        self._pair_request_id = None
+        if self._pair_worker is not None:
+            self._retire_worker(self._pair_worker)
+        self._pair_worker = None
+        for worker in self._spec_workers.values():
+            self._retire_worker(worker)
+        self._spec_workers.clear()
+
+        self._last_pair = None
+        self._last_blend = None
         self._spec_cache.clear()
+        self._csd_results.clear()
+        self._spec_results.clear()
+        self._spec_a = None
+        self._spec_b = None
+        self.phase_blend.set_export_enabled(False)
+        self.phase_blend.show_pair(None, None, None)
+
         if self.rec_a is None or self.rec_b is None:
             self.status.setText('Assign both A and B to compare.')
             return
@@ -180,24 +326,44 @@ class CompareWorkbench(QDialog):
         self._debounce.start()
 
     # ---- pair pipeline ---------------------------------------------------------
-    def _compute_pair(self):
-        if self.rec_a is None or self.rec_b is None:
+    def _compute_pair(self, context: _SelectionContext | None = None):
+        context = context or self._selection_context
+        if (not self._context_is_current(context) or self.rec_a is None or
+                self.rec_b is None or
+                not self._record_matches_context(self.rec_a, 'pair_a', context) or
+                not self._record_matches_context(self.rec_b, 'pair_b', context)):
             return
         if self._pair_worker and self._pair_worker.isRunning():
-            self._pair_worker.cancel()
+            self._retire_worker(self._pair_worker)
         a, b = self.rec_a, self.rec_b
-        worker = PairAnalysisWorker(self.service, a, b)
-        worker.finished_ok.connect(self._on_pair_done)
-        worker.failed.connect(self._on_pair_failed)
+        worker = PairAnalysisWorker(self.service, a, b, cfg=context.pair_cfg)
+        worker.finished_ok.connect(
+            lambda request_id, result, ctx=context:
+            self._on_pair_done(request_id, result, ctx))
+        worker.failed.connect(
+            lambda request_id, msg, ctx=context:
+            self._on_pair_failed(request_id, msg, ctx))
         self._pair_worker = worker
         self._pair_request_id = worker.request_id
         worker.start()
 
-    def _on_pair_done(self, request_id: int, result: dict):
-        if getattr(self, '_pair_request_id', None) != request_id:
+    def _on_pair_done(self, request_id: int, result: dict,
+                      context: _SelectionContext | None = None):
+        if self._pair_request_id != request_id:
             return   # stale result — ignore
-        self._last_pair = result['pair']
-        self._last_blend = result['blend']
+        if context is not None and not self._context_is_current(context):
+            return   # stale result — ignore
+        active_context = self._selection_context
+        if active_context is None or not isinstance(result, dict):
+            return
+        pair = result.get('pair')
+        blend = result.get('blend')
+        if not self._pair_results_match_context(pair, blend, active_context):
+            return
+
+        self.phase_blend.set_export_enabled(False)
+        self._last_pair = pair
+        self._last_blend = blend
         env_a, env_b = result['env_a'], result['env_b']
         self.waveform.show_envelopes(env_a, env_b)
         self.waveform.mark_onset_peak(env_a, COLOR_IR_A, 'A')
@@ -206,15 +372,26 @@ class CompareWorkbench(QDialog):
             self._fingerprint(self.rec_a), self._fingerprint(self.rec_b),
             _short(self.rec_a.path), _short(self.rec_b.path))
         self.phase_blend.show_pair(self._phase(self.rec_a),
-                                   self._phase(self.rec_b), result['pair'])
-        self.phase_blend.show_blend(result['pair'], result['blend'])
-        self.status.setText(f"Pair: delay {result['pair'].delay_ms:+.2f} ms "
-                            f"({result['pair'].delay_samples:+.2f} samples), "
-                            f"polarity {'same' if result['pair'].polarity > 0 else 'INVERTED'}, "
-                            f"correlation confidence {result['pair'].correlation_confidence:.2f}")
+                                   self._phase(self.rec_b), pair)
+        self.phase_blend.show_blend(pair, blend)
+        self.status.setText(f"Pair: delay {pair.delay_ms:+.2f} ms "
+                            f"({pair.delay_samples:+.2f} samples), "
+                            f"polarity {'same' if pair.polarity > 0 else 'INVERTED'}, "
+                            f"correlation confidence {pair.correlation_confidence:.2f}")
+        if (getattr(pair, 'status', None) == AnalysisStatus.OK and
+                getattr(blend, 'status', None) == AnalysisStatus.OK):
+            self.phase_blend.set_export_enabled(True)
         self._on_tab_changed(self.tabs.currentIndex())
 
-    def _on_pair_failed(self, request_id: int, msg: str):
+    def _on_pair_failed(self, request_id: int, msg: str,
+                        context: _SelectionContext | None = None):
+        if self._pair_request_id != request_id:
+            return
+        if context is not None and not self._context_is_current(context):
+            return
+        if self._selection_context is None:
+            return
+        self.phase_blend.set_export_enabled(False)
         self.status.setText(f'Pair analysis failed: {msg}')
 
     def _fingerprint(self, rec):
@@ -243,63 +420,102 @@ class CompareWorkbench(QDialog):
 
     def _ensure_spec(self, cache_key: str, rec: AnalysisResult,
                      spectrogram: bool = False):
+        context = self._selection_context
+        if (not self._context_is_current(context) or
+                not self._record_matches_context(rec, cache_key, context)):
+            return
         if cache_key in self._spec_cache:
-            self._apply_spec(cache_key, self._spec_cache[cache_key])
+            cached = self._spec_cache[cache_key]
+            if self._spec_result_matches_context(cache_key, cached, context):
+                self._apply_spec(cache_key, cached)
+            else:
+                self._spec_cache.pop(cache_key, None)
             return
         worker_key = cache_key
         old = self._spec_workers.get(worker_key)
         if old and old.isRunning():
-            old.cancel()
+            self._retire_worker(old)
 
         from app.extensions.csd import compute_csd
-        from app.extensions.contracts import TimeFrequencyConfig
         from app.extensions.spectrogram import compute_spectrogram
 
         def job(worker):
-            tf = TimeFrequencyConfig(profile='balanced')
             prepared = self.service.prepared(rec)
-            return (compute_spectrogram(prepared, tf) if spectrogram
-                    else compute_csd(prepared, tf))
+            return (compute_spectrogram(prepared, context.tf_cfg) if spectrogram
+                    else compute_csd(prepared, context.tf_cfg))
 
         worker = AnalysisWorker(job)
+        worker._selection_context = context
         worker.finished_ok.connect(
-            lambda rid, res, key=cache_key: self._on_spec_done(key, rid, res))
+            lambda rid, res, key=cache_key, ctx=context:
+            self._on_spec_done(key, rid, res, ctx))
         worker.failed.connect(
-            lambda rid, msg, key=cache_key: self._on_spec_failed(key, msg))
+            lambda rid, msg, key=cache_key, ctx=context:
+            self._on_spec_failed(key, rid, msg, ctx))
         self._spec_workers[worker_key] = worker
         worker.start()
+
+    def _spec_callback_is_current(self, cache_key: str, request_id: int,
+                                  context: _SelectionContext | None) -> bool:
+        worker = self._spec_workers.get(cache_key)
+        if worker is None or getattr(worker, 'request_id', None) != request_id:
+            return False
+        worker_context = getattr(worker, '_selection_context', None)
+        if worker_context is not None and not self._context_is_current(worker_context):
+            return False
+        if context is not None:
+            if not self._context_is_current(context):
+                return False
+            if worker_context is not None and context is not worker_context:
+                return False
+        return self._selection_context is not None
 
     def _on_spec_done(self, *args):
         if len(args) == 2:
             request_id, result = args
-            cache_key = None
-            for k, w in self._spec_workers.items():
-                if getattr(w, 'request_id', None) == request_id:
-                    cache_key = k
-                    break
-            if cache_key is None:
-                for k in ('csd_a', 'csd_b', 'spec_a', 'spec_b'):
-                    if k not in self._spec_cache:
-                        cache_key = k
-                        break
-            if cache_key:
-                self._spec_cache[cache_key] = result
-                self._apply_spec(cache_key, result)
+            matches = [k for k, worker in self._spec_workers.items()
+                       if getattr(worker, 'request_id', None) == request_id]
+            if len(matches) != 1:
+                return
+            cache_key = matches[0]
+            context = getattr(self._spec_workers[cache_key],
+                              '_selection_context', None)
         elif len(args) == 3:
             cache_key, request_id, result = args
-            worker = self._spec_workers.get(cache_key)
-            if not worker or worker.request_id != request_id:
-                return   # stale
-            self._spec_cache[cache_key] = result
-            self._apply_spec(cache_key, result)
+            context = None
+        elif len(args) == 4:
+            cache_key, request_id, result, context = args
+        else:
+            return
+        if not self._spec_callback_is_current(cache_key, request_id, context):
+            return
+        active_context = self._selection_context
+        if active_context is None or not self._spec_result_matches_context(
+                cache_key, result, active_context):
+            return
+        self._spec_cache[cache_key] = result
+        self._apply_spec(cache_key, result)
 
     def _on_spec_failed(self, *args):
         if len(args) == 2:
             request_id, msg = args
-            self.status.setText(f'Analysis failed: {msg}')
+            matches = [k for k, worker in self._spec_workers.items()
+                       if getattr(worker, 'request_id', None) == request_id]
+            if len(matches) != 1:
+                return
+            cache_key = matches[0]
+            context = getattr(self._spec_workers[cache_key],
+                              '_selection_context', None)
         elif len(args) == 3:
             cache_key, request_id, msg = args
-            self.status.setText(f'{cache_key} analysis failed: {msg}')
+            context = None
+        elif len(args) == 4:
+            cache_key, request_id, msg, context = args
+        else:
+            return
+        if not self._spec_callback_is_current(cache_key, request_id, context):
+            return
+        self.status.setText(f'{cache_key} analysis failed: {msg}')
 
     def _apply_spec(self, cache_key: str, result):
         a_first = cache_key.endswith('_a')
@@ -337,23 +553,21 @@ class CompareWorkbench(QDialog):
         dest = self._export_pair()
         if not dest:
             return
-        from app.extensions.contracts import (IRProcessingConfig,
-                                              PairComparisonConfig)
-        from app.extensions.processing_export import export_processed
+        from app.extensions.contracts import IRProcessingConfig
+        from app.extensions.processing_export import export_pair_aligned_b
         pair = self._last_pair
         if pair is None:
             self.status.setText('Run the pair analysis first.')
             return
-        cfg = IRProcessingConfig(delay_samples=pair.delay_samples,
-                                 polarity=pair.polarity,
-                                 normalize_peak_dbfs=-1.0,
+        cfg = IRProcessingConfig(normalize_peak_dbfs=-1.0,
                                  note='suggested alignment from Compare A/B')
+        prep_a = self.service.prepared(self.rec_a)
         prep_b = self.service.prepared(self.rec_b)
-        report = export_processed(prep_b, cfg, dest, suffix='aligned')
+        report = export_pair_aligned_b(prep_a, prep_b, pair, dest, cfg=cfg,
+                                       suffix='aligned')
         self.status.setText(f"Exported {report.output_path.rsplit(chr(92), 1)[-1]} "
-                            f"(delay {cfg.delay_samples:+.2f} samples, polarity "
-                            f"{cfg.polarity:+d})")
-        self.phase_blend.set_export_enabled(True)
+                            f"(delay {pair.delay_samples:+.2f} samples, polarity "
+                            f"{pair.polarity:+d})")
 
     def _export_blend(self):
         dest = self._export_pair()

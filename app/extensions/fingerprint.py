@@ -88,7 +88,8 @@ def compute_fingerprint(record: AnalysisResult, service: ResponseService,
     # ---- phase ---------------------------------------------------------------
     ph = service.phase(record)
     gd = ph.group_delay_ms[:, 0] if ph.group_delay_ms is not None else np.array([])
-    valid = ph.valid_mask & np.isfinite(gd) if len(gd) else np.zeros(0, bool)
+    valid = (ph.valid_mask[:, 0] & np.isfinite(gd) if len(gd)
+             else np.zeros(0, bool))
     if valid.any():
         med = float(np.median(gd[valid]))
         spread = float(np.percentile(gd[valid], 75) - np.percentile(gd[valid], 25))

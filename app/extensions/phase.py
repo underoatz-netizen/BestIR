@@ -36,38 +36,43 @@ def compute_phase(prepared: PreparedIR, cfg: PhaseConfig) -> PhaseResult:
     spec = np.fft.rfft(usable * window, nfft, axis=0)     # (n_bins, n_ch)
     mag = np.abs(spec)
     peak_mag = float(mag.max())
-    valid_bins = mag >= peak_mag * 10 ** (cfg.rel_threshold_db / 20.0)
-    valid = valid_bins.any(axis=1) & in_band
-    valid[0] = False                                       # DC invalid
+    if peak_mag > 0:
+        valid_bins = mag >= peak_mag * 10 ** (cfg.rel_threshold_db / 20.0)
+    else:
+        valid_bins = np.zeros_like(mag, dtype=bool)
+    # B11: validity is decided PER CHANNEL — a silent channel never inherits
+    # validity from an active neighbour, so its phase/GD bins stay NaN.
+    valid = valid_bins & in_band[:, None]                 # (n_bins, n_ch)
+    valid[0, :] = False                                   # DC invalid
 
     phase = np.full((len(freqs), n_ch), np.nan)
+    group_delay_ms = np.full((len(freqs), n_ch), np.nan)
     for ch in range(n_ch):
+        valid_ch = valid[:, ch]
         wrapped = np.angle(spec[:, ch])
-        unwrapped = _masked_unwrap(wrapped, valid)
+        unwrapped = _masked_unwrap(wrapped, valid_ch)
         # onset compensation: remove the linear phase of the onset offset.
         # FFT of the onset-aligned window is already onset-referenced at t=0
         # (first usable sample), so no extra linear term is removed here.
-        phase[:, ch] = np.where(valid, unwrapped, np.nan)
-
-    group_delay_ms = np.full_like(phase, np.nan)
-    if valid.sum() >= 3:
-        f = freqs[valid]
-        for ch in range(n_ch):
-            dphi = np.gradient(phase[valid, ch])
+        phase[:, ch] = np.where(valid_ch, unwrapped, np.nan)
+        if int(valid_ch.sum()) >= 3:
+            f = freqs[valid_ch]
+            dphi = np.gradient(phase[valid_ch, ch])
             # df between adjacent kept bins
             gd_s = -dphi / (2 * np.pi * np.gradient(f))
-            group_delay_ms[valid, ch] = gd_s * 1000.0
+            group_delay_ms[valid_ch, ch] = gd_s * 1000.0
 
     min_phase_rad = None
     excess_phase_rad = None
-    if cfg.min_phase and valid.sum() >= 3:
+    if cfg.min_phase and int(valid.sum()) >= 3:
         try:
             min_phase_rad, excess_phase_rad = _minimum_excess_phase(
                 mag, valid, nfft, phase)
         except (np.linalg.LinAlgError, ValueError, FloatingPointError):
             min_phase_rad = excess_phase_rad = None
 
-    coverage = float(valid.sum()) / max(1, int(in_band.sum()))
+    n_in_band = max(1, int(in_band.sum()))
+    coverage = float(valid.sum(axis=0).mean() / n_in_band)
     warnings = []
     if coverage < 0.5:
         warnings.append(f'low valid-phase coverage: {coverage:.0%} in band')
@@ -110,7 +115,8 @@ def _minimum_excess_phase(mag: np.ndarray, valid: np.ndarray, nfft: int,
     out_min = np.full_like(log_mag, np.nan)
     out_exc = np.full_like(log_mag, np.nan)
     for ch in range(n_ch):
-        lm = np.where(valid, log_mag[:, ch], 0.0)
+        valid_ch = valid[:, ch]
+        lm = np.where(valid_ch, log_mag[:, ch], 0.0)
         full = np.concatenate([lm, lm[-2:0:-1]])
         c = np.fft.ifft(full).real
         c_min = np.zeros_like(c)
@@ -120,9 +126,9 @@ def _minimum_excess_phase(mag: np.ndarray, valid: np.ndarray, nfft: int,
         if len(c) % 2 == 0:
             c_min[half] = c[half]
         theta_min = np.imag(np.fft.fft(c_min))[:len(lm)]
-        out_min[:, ch] = np.where(valid, theta_min, np.nan)
+        out_min[:, ch] = np.where(valid_ch, theta_min, np.nan)
         out_exc[:, ch] = np.where(
-            valid, np.angle(np.exp(1j * (phase_total[:, ch] - theta_min))),
+            valid_ch, np.angle(np.exp(1j * (phase_total[:, ch] - theta_min))),
             np.nan)
     return out_min, out_exc
 

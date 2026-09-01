@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -53,6 +54,7 @@ class AnalysisStatus(str, Enum):
     TOO_SHORT = 'too_short'
     NONFINITE = 'nonfinite'
     UNREADABLE = 'unreadable'
+    INCOMPATIBLE = 'incompatible'
 
 
 @dataclass(frozen=True)
@@ -249,10 +251,10 @@ class PhaseResult:
     phase_rad: np.ndarray | None = None      # (n_freq, n_ch) onset-compensated,
     #                                          unreliable bins set to NaN
     group_delay_ms: np.ndarray | None = None # (n_freq, n_ch) NaN where invalid
-    valid_mask: np.ndarray | None = None     # (n_freq,) bool
+    valid_mask: np.ndarray | None = None     # (n_freq, n_ch) bool per channel
     min_phase_rad: np.ndarray | None = None  # (n_freq, n_ch) or None
     excess_phase_rad: np.ndarray | None = None
-    coverage: float = 0.0                    # fraction of valid bins in band
+    coverage: float = 0.0                    # mean fraction of valid bins in band
 
 
 @dataclass(frozen=True)
@@ -282,6 +284,21 @@ class PairComparisonResult:
     phase_diff_weighted_rms_deg: float | None = None
     gd_median_diff_ms: np.ndarray | None = None   # (n_ch,) or None
     valid_fraction: float = 0.0
+    onset_delay_samples: float = 0.0  # B onset relative to A at analysis rate
+    residual_delay_samples: float = 0.0  # after detected-onset alignment
+    source_sample_rate_a: int = 0
+    source_sample_rate_b: int = 0
+    analysis_sample_rate: int = 0
+    reason: str = ''
+
+
+@dataclass(frozen=True)
+class CancellationRisk:
+    """Cancellation evidence for one configured blend ratio."""
+    worst_cancellation_db: float | None = None
+    worst_cancellation_freq: float | None = None
+    notch_freqs: tuple = ()
+    sensitivity: Mapping[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -304,6 +321,13 @@ class BlendPrediction:
     phase_compat_score: float | None = None   # 0..1, 1 = perfectly compatible
     sensitivity: dict = field(default_factory=dict)  # '+1'/'-1' -> worst cancel dB
     verified_rms_db: float | None = None      # prediction vs time-domain sum
+    risk_by_ratio: Mapping[float, CancellationRisk] = field(default_factory=dict)
+    onset_delay_samples: float = 0.0  # timing component applied to B
+    residual_delay_samples: float = 0.0  # timing component applied to B
+    source_sample_rate_a: int = 0
+    source_sample_rate_b: int = 0
+    analysis_sample_rate: int = 0
+    reason: str = ''
 
 
 @dataclass(frozen=True)

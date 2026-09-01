@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 
 pytest.importorskip('PySide6')
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 
 @pytest.fixture(scope='module')
@@ -97,6 +98,139 @@ def test_workbench_populates_ab_and_summary(extended, qapp):
     extended._workbench.close()
 
 
+def test_b07_invalid_b_spectrogram_and_blend_surface_no_data(qapp):
+    from app.extensions.contracts import (AnalysisStatus, AudioBuffer,
+                                          PairComparisonConfig,
+                                          PreprocessingConfig, SourceKey,
+                                          TimeFrequencyConfig)
+    from app.extensions.pair_compare import compare_pair, predict_blend
+    from app.extensions.preprocessing import prepare
+    from app.extensions.spectrogram import compute_spectrogram
+    from app.extensions.ui.phase_blend_view import PhaseBlendView
+    from app.extensions.ui.spectrogram_view import SpectrogramView
+    from tests.extensions import fixtures as fx
+
+    def prepared(name, data):
+        samples = np.asarray(data, dtype=np.float64)[:, None].copy()
+        samples.setflags(write=False)
+        return prepare(
+            AudioBuffer(SourceKey(name, 0, 0, fx.SR, 1), samples),
+            PreprocessingConfig(),
+        )
+
+    valid = prepared('valid', fx.decay_fixture(150.0, 0.02, n=24000))
+    silent = prepared('silent', fx.silent())
+    cfg = PairComparisonConfig()
+    spec_a = compute_spectrogram(valid, TimeFrequencyConfig())
+    spec_b = compute_spectrogram(silent, TimeFrequencyConfig())
+    pair = compare_pair(valid, silent, cfg)
+    blend = predict_blend(valid, silent, cfg, alignment='suggested')
+
+    assert spec_a.status == AnalysisStatus.OK
+    assert spec_b.status == AnalysisStatus.SILENT
+    assert spec_b.magnitude_db is None
+    assert pair.status == blend.status == AnalysisStatus.SILENT
+
+    spectrogram = SpectrogramView()
+    spectrogram.show_pair(spec_a, spec_b)
+    visible_text = ' '.join(
+        label.text().lower() for label in spectrogram.findChildren(QLabel)
+    )
+    assert 'silent' in visible_text
+    assert any(marker in visible_text for marker in
+               ('no data', 'unavailable', 'invalid'))
+
+    phase_blend = PhaseBlendView()
+    phase_blend.show_blend(pair, blend)
+    comb_text = phase_blend.comb_chip.text().lower()
+    assert not any(label in comb_text for label in ('safe', 'low'))
+    assert any(marker in comb_text for marker in
+               ('no data', 'unavailable', 'invalid', 'n/a'))
+
+
+def test_b04_phase_blend_chip_tracks_active_slider_ratio(qapp):
+    from app.extensions.contracts import (AnalysisStatus, AudioBuffer,
+                                          PairComparisonConfig,
+                                          PreprocessingConfig, SourceKey)
+    from app.extensions.pair_compare import compare_pair, predict_blend
+    from app.extensions.preprocessing import prepare
+    from app.extensions.ui.phase_blend_view import PhaseBlendView
+    from tests.extensions import fixtures as fx
+
+    def prepared(name, data):
+        samples = np.asarray(data, dtype=np.float64)[:, None].copy()
+        samples.setflags(write=False)
+        return prepare(
+            AudioBuffer(SourceKey(name, 0, 0, fx.SR, 1), samples),
+            PreprocessingConfig(),
+        )
+
+    signal = fx.decay_fixture(100.0, 0.02, n=24000, delay_ms=2.0)
+    a, b = prepared('a', signal), prepared('inverted-b', -signal)
+    cfg = PairComparisonConfig(blend_ratios=(0.0, 0.5, 1.0))
+    pair = compare_pair(a, b, cfg)
+    blend = predict_blend(a, b, cfg, alignment='raw')
+    assert pair.status == blend.status == AnalysisStatus.OK
+
+    view = PhaseBlendView()
+    view.show_blend(pair, blend)
+    view.ratio_slider.setValue(0)
+    qapp.processEvents()
+    view.ratio_slider.setValue(50)
+    qapp.processEvents()
+
+    cancellation_text = view.comb_chip.text().lower()
+    assert '50% B' in view.ratio_label.text()
+    assert not any(label in cancellation_text for label in ('safe', 'low'))
+    assert any(label in cancellation_text for label in ('high', 'medium', 'error'))
+
+    view.ratio_slider.setValue(0)
+    qapp.processEvents()
+    endpoint_text = view.comb_chip.text().lower()
+    assert '0% B' in view.ratio_label.text()
+    assert any(label in endpoint_text for label in ('safe', 'low'))
+    assert endpoint_text != cancellation_text
+
+
+def test_b04_valid_blend_without_reliable_bins_is_unknown(qapp):
+    from app.extensions.contracts import (AnalysisStatus, AudioBuffer,
+                                          PairComparisonConfig,
+                                          PreprocessingConfig, SourceKey)
+    from app.extensions.pair_compare import compare_pair, predict_blend
+    from app.extensions.preprocessing import prepare
+    from app.extensions.ui.phase_blend_view import PhaseBlendView
+    from tests.extensions import fixtures as fx
+
+    samples = fx.decay_fixture(150.0, 0.02, n=24000)[:, None].copy()
+    samples.setflags(write=False)
+    prepared = prepare(
+        AudioBuffer(SourceKey('valid', 0, 0, fx.SR, 1), samples),
+        PreprocessingConfig(),
+    )
+    safe_cfg = PairComparisonConfig(blend_ratios=(0.0, 0.5, 1.0))
+    no_bins_cfg = PairComparisonConfig(
+        blend_ratios=(0.0, 0.5, 1.0), risk_band=(float(fx.SR), float(2 * fx.SR)),
+    )
+    pair = compare_pair(prepared, prepared, safe_cfg)
+    safe_blend = predict_blend(prepared, prepared, safe_cfg, alignment='raw')
+    no_bins_blend = predict_blend(prepared, prepared, no_bins_cfg,
+                                  alignment='raw')
+    assert pair.status == safe_blend.status == no_bins_blend.status == AnalysisStatus.OK
+    assert no_bins_blend.magnitude_db is not None
+    assert no_bins_blend.worst_cancellation_db is None
+
+    view = PhaseBlendView()
+    view.show_blend(pair, safe_blend)
+    assert any(label in view.comb_chip.text().lower() for label in ('safe', 'low'))
+    view.show_blend(pair, no_bins_blend)
+    qapp.processEvents()
+
+    no_data_text = view.comb_chip.text().lower()
+    assert any(marker in no_data_text for marker in
+               ('no data', 'unknown', 'unavailable', 'n/a'))
+    assert not any(label in no_data_text for label in ('safe', 'low'))
+
+
 def test_stale_result_is_rejected(extended):
     extended.show_workbench()
     wb = extended._workbench
@@ -113,6 +247,217 @@ def test_stale_result_is_rejected(extended):
                                 'env_a': None, 'env_b': None})
     assert wb.status.text() == status_before   # stale update ignored
     extended._workbench.close()
+
+
+def _pair_bundle(workbench, rec_a, rec_b):
+    from app.extensions.contracts import PairComparisonConfig
+    from app.extensions.pair_compare import compare_pair, predict_blend
+
+    cfg = PairComparisonConfig()
+    prepared_a = workbench.service.prepared(rec_a)
+    prepared_b = workbench.service.prepared(rec_b)
+    return {
+        'pair': compare_pair(prepared_a, prepared_b, cfg),
+        'blend': predict_blend(prepared_a, prepared_b, cfg,
+                               alignment='suggested'),
+        'env_a': None,
+        'env_b': None,
+    }
+
+
+def _run_queued_callback(qapp, callback):
+    delivered = []
+
+    def deliver():
+        delivered.append(True)
+        callback()
+
+    QTimer.singleShot(0, deliver)
+    qapp.processEvents()
+    assert delivered == [True]
+
+
+def _export_buttons_enabled(workbench):
+    view = workbench.phase_blend
+    return tuple(button.isEnabled() for button in
+                 (view.btn_export_b, view.btn_export_blend,
+                  view.btn_export_report))
+
+
+def test_b06_selection_ignores_queued_old_success_before_debounce(extended,
+                                                                    qapp):
+    """A queued A/B success cannot revive results after B changes to C."""
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b, c = extended.library_panel.visible_records()
+    old_bundle = _pair_bundle(wb, a, b)
+    try:
+        wb.set_pair(a, b)
+        old_request_id = 8601
+        wb._pair_request_id = old_request_id
+        # Seed completed A/B state so invalidation must revoke export eligibility.
+        wb._last_pair = old_bundle['pair']
+        wb._last_blend = old_bundle['blend']
+        wb.phase_blend.set_export_enabled(True)
+
+        wb.set_b(c)
+        state_after_selection = (wb._last_pair, wb._last_blend,
+                                 _export_buttons_enabled(wb))
+        new_status = wb.status.text()
+        summary_rows = wb.summary.table.rowCount()
+        callback_while_debouncing = []
+
+        def deliver_old_success():
+            callback_while_debouncing.append(wb._debounce.isActive())
+            wb._on_pair_done(old_request_id, old_bundle)
+
+        _run_queued_callback(qapp, deliver_old_success)
+
+        assert callback_while_debouncing == [True]
+        assert state_after_selection == (None, None, (False, False, False))
+        assert wb._last_pair is None
+        assert wb._last_blend is None
+        assert _export_buttons_enabled(wb) == (False, False, False)
+        assert wb.status.text() == new_status
+        assert wb.summary.table.rowCount() == summary_rows
+        assert wb.phase_blend._pair_result is None
+        assert wb.phase_blend._blend_result is None
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b06_queued_old_failure_keeps_new_selection_analyzing(extended, qapp):
+    """A queued A/B failure cannot replace the A/C analyzing status."""
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b, c = extended.library_panel.visible_records()
+    try:
+        wb.set_pair(a, b)
+        old_request_id = 8602
+        wb._pair_request_id = old_request_id
+
+        wb.set_b(c)
+        new_status = wb.status.text()
+        callback_while_debouncing = []
+
+        def deliver_old_failure():
+            callback_while_debouncing.append(wb._debounce.isActive())
+            wb._on_pair_failed(old_request_id, 'old A/B failure')
+
+        _run_queued_callback(qapp, deliver_old_failure)
+
+        assert callback_while_debouncing == [True]
+        assert wb.status.text() == new_status
+        assert 'analyzing' in wb.status.text().lower()
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b06_current_looking_id_rejects_wrong_pair_identity(extended, qapp):
+    """Matching IDs are insufficient when callback sources are from A/B, not A/C."""
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b, c = extended.library_panel.visible_records()
+    old_bundle = _pair_bundle(wb, a, b)
+    try:
+        wb.set_pair(a, c)
+        callback_id = 8603
+        wb._pair_request_id = callback_id
+        current_b_key = wb.service.prepared(c).key
+        assert old_bundle['pair'].key_b != current_b_key
+        assert old_bundle['blend'].key_b != current_b_key
+        new_status = wb.status.text()
+        summary_rows = wb.summary.table.rowCount()
+        callback_while_debouncing = []
+
+        def deliver_wrong_pair():
+            callback_while_debouncing.append(wb._debounce.isActive())
+            wb._on_pair_done(callback_id, old_bundle)
+
+        _run_queued_callback(qapp, deliver_wrong_pair)
+
+        assert callback_while_debouncing == [True]
+        assert wb._last_pair is None
+        assert wb._last_blend is None
+        assert wb.status.text() == new_status
+        assert wb.summary.table.rowCount() == summary_rows
+        assert wb.phase_blend._pair_result is None
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+
+def test_b06_queued_lazy_results_do_not_render_or_cache_old_b(extended, qapp):
+    """Old B CSD/spectrogram callbacks cannot populate an A/C workbench."""
+    from app.extensions.contracts import TimeFrequencyConfig
+    from app.extensions.csd import compute_csd
+    from app.extensions.spectrogram import compute_spectrogram
+
+    class PendingSpecWorker:
+        def __init__(self, request_id):
+            self.request_id = request_id
+            self.cancelled = False
+
+        def isRunning(self):
+            return not self.cancelled
+
+        def cancel(self):
+            self.cancelled = True
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b, c = extended.library_panel.visible_records()
+    tf = TimeFrequencyConfig(profile='balanced')
+    old_csd = compute_csd(wb.service.prepared(b), tf)
+    old_spec = compute_spectrogram(wb.service.prepared(b), tf)
+    current_spec_a = compute_spectrogram(wb.service.prepared(a), tf)
+    try:
+        wb.set_pair(a, b)
+        csd_request_id, spec_request_id = 8604, 8605
+        wb._spec_workers = {
+            'csd_b': PendingSpecWorker(csd_request_id),
+            'spec_b': PendingSpecWorker(spec_request_id),
+        }
+
+        wb.set_b(c)
+        current_b_key = wb.service.prepared(c).key
+        assert old_csd.key != current_b_key
+        assert old_spec.key != current_b_key
+        # A is valid for the new pair, so an old B would otherwise render A/B.
+        wb._spec_a = current_spec_a
+        wb._spec_results = {'a': current_spec_a}
+        csd_items = tuple(id(item) for item in wb.csd._plot.getPlotItem().items)
+        spec_items = {
+            name: tuple(id(item) for item in plot.getPlotItem().items)
+            for name, plot in wb.spectrogram._plots.items()
+        }
+        diff_text = wb.spectrogram._diff_label.text()
+        callback_while_debouncing = []
+
+        def deliver_old_lazy_results():
+            callback_while_debouncing.append(wb._debounce.isActive())
+            wb._on_spec_done('csd_b', csd_request_id, old_csd)
+            wb._on_spec_done('spec_b', spec_request_id, old_spec)
+
+        _run_queued_callback(qapp, deliver_old_lazy_results)
+
+        assert callback_while_debouncing == [True]
+        assert 'csd_b' not in wb._spec_cache
+        assert 'spec_b' not in wb._spec_cache
+        assert getattr(wb, '_csd_results', {}).get('b') is not old_csd
+        assert getattr(wb, '_spec_results', {}).get('b') is not old_spec
+        assert getattr(wb, '_spec_b', None) is not old_spec
+        assert tuple(id(item) for item in wb.csd._plot.getPlotItem().items) == csd_items
+        assert {
+            name: tuple(id(item) for item in plot.getPlotItem().items)
+            for name, plot in wb.spectrogram._plots.items()
+        } == spec_items
+        assert wb.spectrogram._diff_label.text() == diff_text
+    finally:
+        wb._debounce.stop()
+        wb.close()
 
 
 def test_opengl_absence_falls_back():
