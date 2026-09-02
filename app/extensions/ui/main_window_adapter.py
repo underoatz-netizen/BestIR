@@ -10,7 +10,6 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QToolBar
 
 from app.extensions.service import ResponseService
 from app.extensions.ui.styles_boro import (
@@ -20,6 +19,7 @@ from app.extensions.ui.styles_boro import (
 )
 from app.ui.main_window import MainWindow
 from .compare_workbench import CompareWorkbench
+from .responsive_layout import ResponsiveLayoutAdapter
 from .response_search_panel import ResponseSearchPanel
 from .workers import AnalysisWorker
 
@@ -32,18 +32,18 @@ class ExtendedMainWindow(MainWindow):
         self._search_panel = None
         self._search_dialog = None
 
-        toolbar = QToolBar('Response tools')
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
         act_compare = QAction('Compare A/B', self)
         act_compare.triggered.connect(self.show_workbench)
-        toolbar.addAction(act_compare)
         act_search = QAction('Response Search', self)
         act_search.triggered.connect(self.show_response_search)
-        toolbar.addAction(act_search)
 
         # selection -> workbench A/B
         self.library_panel.selection_changed.connect(self._push_selection)
+
+        # U01 foundation: responsive action flow + inspector drawer + filter
+        # wrap. Owns the extension toolbar (replaces the plain one).
+        self._responsive = ResponsiveLayoutAdapter(
+            self, actions=[act_compare, act_search])
 
         # Apply Boro visual overrides on top of inherited legacy widgets
         self._apply_boro_overrides()
@@ -62,29 +62,60 @@ class ExtendedMainWindow(MainWindow):
         self._patch_table_model()
 
     def _patch_plot_panel(self):
-        """Override plot background and curve pens to Boro palette."""
-        import app.ui.plot_panel as pp
+        """Instance-local Boro plot styling (B18: no module-global mutation).
 
+        Legacy plot_panel._refresh_pens reads module-level pens; we do not
+        overwrite those globals. This instance gets its own pen set applied
+        to the existing items plus a bound _refresh_pens that keeps using it,
+        so other PlotPanel instances (workbench plots, future windows) are
+        unaffected.
+        """
         # Canvas background: slate -> obsidian
         self.plot.setBackground(SURFACE_CARD)
 
-        # Redefine pens with Boro tokens
-        pp._CURVE_PEN = pg.mkPen(QColor(120, 130, 145, 50), width=1)
-        pp._HOVER_PEN = pg.mkPen(QColor(ACCENT_GOLD), width=2)
-        pp._SEL_PEN = pg.mkPen(QColor(COLOR_IR_A), width=3)
-        pp._TOP_PEN = pg.mkPen(QColor(66, 207, 0, 220), width=2)  # emerald
-        pp._TARGET_PEN = pg.mkPen(QColor(COLOR_DIFF), width=2,
-                                   style=Qt.DashLine)
-        pp._DI_PEN = pg.mkPen(QColor(254, 201, 3, 200), width=1.5)  # gold
-        pp._OUTPUT_PEN = pg.mkPen(QColor(COLOR_IR_A), width=2.5)  # cyan
+        # Instance-local Boro pens
+        self._boro_pens = {
+            'curve': pg.mkPen(QColor(120, 130, 145, 50), width=1),
+            'hover': pg.mkPen(QColor(ACCENT_GOLD), width=2),
+            'sel': pg.mkPen(QColor(COLOR_IR_A), width=3),
+            'top': pg.mkPen(QColor(66, 207, 0, 220), width=2),      # emerald
+            'target': pg.mkPen(QColor(COLOR_DIFF), width=2,
+                               style=Qt.DashLine),
+            'di': pg.mkPen(QColor(254, 201, 3, 200), width=1.5),    # gold
+            'output': pg.mkPen(QColor(COLOR_IR_A), width=2.5),      # cyan
+        }
+
+        # Existing items pick up the Boro pens immediately
+        for item in self.plot._items.values():
+            item.setPen(self._boro_pens['curve'])
+        self.plot._target_item.setPen(self._boro_pens['target'])
+        self.plot._di_item.setPen(self._boro_pens['di'])
+        self.plot._output_item.setPen(self._boro_pens['output'])
 
         # Hover label text -> gold
         self.plot._hover_label.setColor(ACCENT_GOLD)
 
-        # Target curve pen
-        self.plot._target_item.setPen(pp._TARGET_PEN)
-        self.plot._di_item.setPen(pp._DI_PEN)
-        self.plot._output_item.setPen(pp._OUTPUT_PEN)
+        # Instance-local refresh keeps Boro pens on every selection /
+        # hover / top-N refresh without touching app/ui.plot_panel globals.
+        import types
+        boro_pens = self._boro_pens
+
+        def boro_refresh(plot_self):
+            for path, item in plot_self._items.items():
+                if path in plot_self._selected:
+                    item.setPen(boro_pens['sel'])
+                    item.setZValue(30)
+                elif path in plot_self._top:
+                    item.setPen(boro_pens['top'])
+                    item.setZValue(15)
+                elif path == plot_self._hover_path:
+                    item.setPen(boro_pens['hover'])
+                    item.setZValue(20)
+                else:
+                    item.setPen(boro_pens['curve'])
+                    item.setZValue(5)
+
+        self.plot._refresh_pens = types.MethodType(boro_refresh, self.plot)
 
         # Grid alpha slightly lower for dark canvas
         pi = self.plot.getPlotItem()
@@ -158,9 +189,24 @@ class ExtendedMainWindow(MainWindow):
         sp.tm_rank_btn.style().polish(sp.tm_rank_btn)
 
     def _patch_table_model(self):
-        """Override table model top-rank highlight to Boro gold tint."""
-        import app.ui.model as model_mod
-        model_mod._TOP5_BG = QColor(ACCENT_GOLD_BG)
+        """Instance-local top-rank highlight (B18: no _TOP5_BG mutation).
+
+        Wraps only this window's model.data so the legacy top-N BackgroundRole
+        returns the Boro gold tint; app.ui.model._TOP5_BG stays untouched for
+        every other window/model instance.
+        """
+        import types
+        model = self.library_panel.model
+        original_data = model.data.__func__
+        gold_bg = QColor(ACCENT_GOLD_BG)
+
+        def boro_data(model_self, index, role=Qt.DisplayRole):
+            value = original_data(model_self, index, role)
+            if role == Qt.BackgroundRole and value is not None:
+                return gold_bg
+            return value
+
+        model.data = types.MethodType(boro_data, model)
 
     # ---- API used by the workbench -------------------------------------------
     def selected_library_records(self):

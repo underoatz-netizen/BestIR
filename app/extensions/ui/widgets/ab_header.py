@@ -12,6 +12,7 @@ from ..styles_boro import (ACCENT_GOLD, BORDER_CARD, BORDER_FOCUS,
                            COLOR_IR_B, COLOR_IR_B_BG, COLOR_IR_B_BORDER,
                            FONT_FAMILY_MONO, FONT_FAMILY_PRIMARY,
                            SURFACE_CARD, SURFACE_RAISED, TEXT_MAIN, TEXT_MUTED)
+from .middle_elide import MiddleElideLabel
 from .validity_chip import ValidityChip
 
 
@@ -53,6 +54,7 @@ class IRDeckCard(QFrame):
         slot_lbl = QLabel(slot)
         slot_lbl.setAlignment(Qt.AlignCenter)
         slot_lbl.setFixedSize(26, 26)
+        slot_lbl.setAccessibleName(f'IR {slot} slot badge')
         slot_lbl.setStyleSheet(f"""
             color: #ffffff;
             background-color: {color};
@@ -66,11 +68,13 @@ class IRDeckCard(QFrame):
         info_col = QVBoxLayout()
         info_col.setSpacing(2)
 
-        self.name_lbl = QLabel('No IR assigned')
+        self.name_lbl = MiddleElideLabel('No IR assigned')
+        self.name_lbl.setAccessibleName(f'IR {slot} name')
         self.name_lbl.setStyleSheet(f"color: {TEXT_MAIN}; font-weight: 600; font-size: 9.5pt;")
         info_col.addWidget(self.name_lbl)
 
         self.meta_lbl = QLabel('Select a row in the library to assign')
+        self.meta_lbl.setAccessibleName(f'IR {slot} metadata')
         self.meta_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 8pt; font-family: {FONT_FAMILY_MONO};")
         info_col.addWidget(self.meta_lbl)
 
@@ -78,10 +82,13 @@ class IRDeckCard(QFrame):
 
         # Validity Chip
         self.chip = ValidityChip('Empty', state='unknown')
+        self.chip.setAccessibleName(f'IR {slot} validity')
         layout.addWidget(self.chip, 0)
 
         # Assign button
         self.set_btn = QPushButton(f'Set {slot} ← Sel')
+        self.set_btn.setAccessibleName(f'Set IR {slot} from library selection')
+        self.set_btn.setToolTip(f'Assign the selected library row to IR {slot}')
         self.set_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {SURFACE_RAISED};
@@ -103,14 +110,15 @@ class IRDeckCard(QFrame):
     def set_record(self, rec: AnalysisResult | None) -> None:
         if rec is None:
             self.name_lbl.setText('No IR assigned')
-            self.name_lbl.setToolTip('')
+            self.name_lbl.setPath('')
+            self.name_lbl.setAccessibleName(f'IR {self._slot} name')
             self.meta_lbl.setText('Select a row in the library to assign')
             self.chip.set_state('unknown', 'Empty')
             return
 
         name = _short_name(rec.path)
         self.name_lbl.setText(name)
-        self.name_lbl.setToolTip(rec.path)
+        self.name_lbl.setPath(rec.path)
         ch_str = 'Mono' if rec.channels == 1 else 'Stereo'
         score_str = f'Tone RMS: {rec.score:.1f} dB · ' if rec.score is not None else ''
         self.meta_lbl.setText(f"{score_str}{rec.sample_rate} Hz · {ch_str} · {rec.effective_length_ms:.0f} ms")
@@ -136,6 +144,7 @@ class ABHeaderDeck(QWidget):
 
         self.swap_btn = QPushButton('⇄')
         self.swap_btn.setToolTip('Swap A and B')
+        self.swap_btn.setAccessibleName('Swap IR A and B')
         self.swap_btn.setFixedSize(36, 36)
         self.swap_btn.setStyleSheet(f"""
             QPushButton {{
