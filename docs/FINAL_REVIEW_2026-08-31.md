@@ -2,6 +2,8 @@
 
 วันที่ตรวจ: 2026-08-31 · commit: `db6e9f2f78cd850b6cec157aa7276a939e43a86c`
 
+> อัปเดตสถานะล่าสุด: ดูหัวข้อ **"Wave 6 QA addendum (2026-09-02)"** ด้านล่าง — เนื้อหาใต้บรรทัดนี้อ้างอิงสถานะ ณ commit `db6e9f2` เท่านั้น
+
 ## ผลสรุป
 
 **ยังไม่ผ่าน final QA สำหรับส่วน Compare / Response Search / Blend Export** แม้ชุดทดสอบปัจจุบันผ่าน 93/93 รายการ เพราะพบข้อผิดพลาดที่ทำซ้ำได้ทั้งในตัวเลข DSP และการเชื่อมต่อ UI โดยเฉพาะผล preview ไม่ตรงกับ processing ที่ใช้ export, sample rate ผิด, stale A/B และคำเตือน cancellation ผิดความหมาย
@@ -183,3 +185,12 @@ Suggested usable flow: **EQ shortlist เดิม → เลือก A/B → S
 ผู้ใช้ขอให้ Summary ใน A/B อธิบายโทนและการตอบสนองด้วยภาษาที่นักดนตรีเข้าใจ ไม่ใช่แสดงแต่ตัวเลขหรือแปลศัพท์ตรงตัว เพิ่มข้อกำหนดและตัวอย่างไว้ใน [MUSICIAN_SUMMARY_SPEC_TH.md](E:/Projects/BestIR/docs/MUSICIAN_SUMMARY_SPEC_TH.md) โดยใช้ skill `design:ux-copy` วางภาษาและ hierarchy
 
 เอกสารครอบคลุม tone/response/pair distinction, evidence-based Thai glossary, optional read-only input adapter, pure description rules, UI states และ acceptance tests นี่เป็นสเปกส่งต่อ ยังไม่ได้แก้ production UI; ต้องผ่าน validity/identity/DSP gates ที่เกี่ยวข้องก่อนใช้คำอธิบายกับผลวิเคราะห์จริง
+
+## Wave 6 QA addendum (2026-09-02)
+
+สถานะ ณ commit `e6f049b` (Wave 5 UI pass) เป็นส่วนเพิ่มบนบันทึกนี้; เนื้อหาข้างบนคงเป็นหลักฐาน ณ `db6e9f2` ตามเดิม
+
+- **ความคืบหน้า**: Wave 1-5 แก้ B01-B18 และ U01, U03-U09 แล้ว; `python -m pytest tests -q` ผ่าน **210 tests** (จากเดิม 93) และ `python docs/review_tools/final_review_probe.py` รันผ่าน โดยยืนยันว่า fingerprint ทำงานนอก GUI thread (`on_gui_thread: false`)
+- **ยังไม่ทดสอบ (NOT RUN)**: native Windows desktop interaction และ DPI 125-200%, audio-device playback/re-amping, packaged EXE smoke รอบนี้, และ OpenGL 3D บน GPU จริง ห้ามอ้างว่าขอบเขตเหล่านี้ผ่าน; release gate ข้อ 6 (native desktop/high-DPI, GL, EXE reopen) จึงยังไม่ครบและ QA ยังไม่ sign-off
+- **เลื่อน (deferred)**: U02 (search 33 px / filter row) เลื่อนไป Wave 7 พร้อมงาน native DPI/interaction gate; U01-U09 จึงยังไม่ถือว่าปิดครบทั้งชุด
+- **diagnostic probe**: `docs/review_tools/final_review_probe.py` เพิ่มการตรวจ B06 ว่า stale result ของ request เก่า (ID 42) ถูก reject และไม่กลายเป็น pair ที่ active/exportable (`stale_pair_rejected`) การเปลี่ยนนี้เป็นเครื่องมือวินิจฉัยเท่านั้น ไม่กระทบ production code
