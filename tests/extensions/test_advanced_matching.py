@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.core.analysis import analyze_file
 from app.core.matching import score_curve
 from app.extensions.advanced_matching import (pair_search, rank_by_response,
+                                              response_search,
                                               stage1_shortlist)
 from app.extensions.cache import FingerprintCache
 from app.extensions.contracts import FeatureValue, ResponseFingerprint, SourceKey
@@ -180,3 +181,80 @@ def test_pair_search_prefers_phase_compatible_partner(tmp_path):
     best = out[0]
     assert best.record.path == psame.path, \
         (best.record.path, best.breakdown.explain() if best.breakdown else None)
+
+
+def _fp_spy(records, service):
+    """Fingerprint-getter that records which records were requested, so a test
+    can prove the shared pipeline fingerprints only the stage-1 shortlist."""
+    requested = []
+
+    def get(record):
+        requested.append(record.path)
+        return service.fingerprint(record)
+
+    return get, requested
+
+
+def test_b16_shared_pipeline_shortlists_before_fingerprinting(tmp_path):
+    """B16 gate: response_search fingerprints ONLY the stage-1 tone shortlist
+    (bounded, identical to both UI entry points) — never the full library."""
+    tight, boomy = _tight_vs_boomy(tmp_path)
+    far = _mk(tmp_path, 'far.wav', [6, 4, 2, 0, -2, -4, -6, -8], seed=9)
+    records = [tight, boomy, far]
+    target = tight.curve_db
+    svc = ResponseService(cache=FingerprintCache(str(tmp_path / 'fp.db')))
+
+    get, requested = _fp_spy(records, svc)
+    out = response_search(records, svc, target, fingerprints_get=get,
+                          weights={'tone': 1.0, 'd20': 1.0},
+                          constraints={'max_tone_db': 3.0},
+                          policy='exclude', top_k=2)
+    assert requested, 'pipeline never requested fingerprints'
+    assert far.path not in requested, \
+        'off-shortlist record was fingerprinted by the shared pipeline'
+    ranked_paths = [c.record.path for c in out if not c.excluded]
+    assert tight.path in ranked_paths
+    assert far.path not in ranked_paths   # tone constraint excludes far
+
+
+def test_b16_shared_pipeline_equals_explicit_two_stage(tmp_path):
+    """B16 gate: response_search is exactly stage1_shortlist -> fingerprint ->
+    rank_by_response — the same math a caller would write by hand, so the two
+    UI entry points cannot drift from each other or from the raw functions."""
+    tight, boomy = _tight_vs_boomy(tmp_path)
+    far = _mk(tmp_path, 'far.wav', [6, 4, 2, 0, -2, -4, -6, -8], seed=9)
+    records = [tight, boomy, far]
+    target = tight.curve_db
+    svc = ResponseService(cache=FingerprintCache(str(tmp_path / 'fp.db')))
+
+    request = {'weights': {'tone': 1.0, 'd20': 1.0, 'boxiness': 1.0},
+               'constraints': {'max_tone_db': 3.0},
+               'targets': {'d20': 15.0, 'boxiness': 0.0},
+               'policy': 'exclude'}
+    shared = response_search(
+        records, svc, target, fingerprints_get=svc.fingerprint,
+        weights=request['weights'], constraints=request['constraints'],
+        targets=request['targets'], policy=request['policy'])
+
+    max_tone = request['constraints'].get('max_tone_db', 6.0)
+    short = stage1_shortlist(records, target, max_tone_db=max_tone, top_k=40)
+    short_records = [r for r, _ in short]
+    fps = {r.path: svc.fingerprint(r) for r in short_records}
+    manual = rank_by_response(short_records, fps, svc, target,
+                              weights=request['weights'],
+                              constraints=request['constraints'],
+                              targets=request['targets'],
+                              policy=request['policy'],
+                              max_tone_db=max_tone)
+
+    assert len(shared) == len(manual)
+    for c_s, c_m in zip(shared, manual):
+        assert c_s.record.path == c_m.record.path
+        assert c_s.excluded == c_m.excluded
+        assert c_s.reason == c_m.reason
+        if c_s.breakdown is not None:
+            assert c_s.breakdown.total == c_m.breakdown.total
+            assert ([x.name for x in c_s.breakdown.components]
+                    == [x.name for x in c_m.breakdown.components])
+            assert ([(x.raw_value, x.norm_loss) for x in c_s.breakdown.components]
+                    == [(x.raw_value, x.norm_loss) for x in c_m.breakdown.components])

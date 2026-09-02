@@ -653,17 +653,18 @@ class CompareWorkbench(QDialog):
         target = anchor.curve_db
 
         def job(worker):
-            from app.extensions.advanced_matching import rank_by_response
-            fps = {}
-            for i, r in enumerate(records[:400]):
-                if worker.cancelled:
-                    break
-                fps[r.path] = self.service.fingerprint(r)
-            return rank_by_response(records, fps, self.service, target,
-                                    weights=request['weights'],
-                                    constraints=request['constraints'],
-                                    targets=request.get('targets'),  # B08
-                                    policy=request['policy'])
+            # B16: one shared pipeline (stage1 shortlist -> fingerprint ->
+            # rank), identical to the toolbar/main-window search. Heavy
+            # fingerprint DSP runs here, on the worker thread.
+            from app.extensions.advanced_matching import response_search
+            return response_search(
+                records, self.service, target,
+                fingerprints_get=self.service.fingerprint,
+                weights=request['weights'],
+                constraints=request['constraints'],
+                targets=request.get('targets'),  # B08
+                policy=request['policy'],
+                cancel=lambda: worker.cancelled)
 
         self.status.setText('Response search: fingerprinting shortlist…')
         worker = AnalysisWorker(job)

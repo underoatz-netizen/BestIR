@@ -1034,6 +1034,55 @@ def test_b08_main_window_search_job_forwards_targets(extended, qapp,
     assert seen.get('targets') is request['targets']
 
 
+# ---- B16: one shared search/fingerprint pipeline for both entry points ----
+def test_b16_both_search_entry_points_share_one_pipeline(extended, qapp,
+                                                         monkeypatch):
+    """B16 gate: toolbar/main-window search and workbench search both route
+    through the SAME response_search pipeline (identical stage1 shortlist ->
+    fingerprint -> rank), so identical requests cannot drift apart."""
+    import app.extensions.advanced_matching as am_mod
+    import app.extensions.ui.compare_workbench as wb_mod
+    import app.extensions.ui.main_window_adapter as mw_mod
+
+    real_search = am_mod.response_search   # capture before patching
+    calls = []
+
+    def spy_search(records, service, target_curve, **kwargs):
+        calls.append((records, service, target_curve, kwargs))
+        return real_search(records, service, target_curve, **kwargs)
+
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _SyncWorker)
+    monkeypatch.setattr(mw_mod, 'AnalysisWorker', _SyncWorker)
+    monkeypatch.setattr(am_mod, 'response_search', spy_search)
+
+    request = {'weights': {'tone': 1.0, 'd20': 1.5},
+               'constraints': {'max_tone_db': 3.0},
+               'targets': {'d20': 25.0},
+               'policy': 'exclude'}
+
+    extended.show_workbench()
+    wb = extended._workbench
+    try:
+        wb._run_response_search(request)
+        extended._run_search(request)
+    finally:
+        wb._debounce.stop()
+        wb.close()
+
+    assert len(calls) == 2, f'pipeline used {len(calls)} times, expected 2'
+    kwargs_a, kwargs_b = calls[0][3], calls[1][3]
+    for key in ('weights', 'constraints', 'targets', 'policy'):
+        assert kwargs_a[key] == request[key], key
+        assert kwargs_b[key] == request[key], key
+    # both entry points forward the SAME shortlist window: no 400-cap drift
+    assert 'top_k' not in kwargs_a or kwargs_a.get('top_k') is None
+    assert 'top_k' not in kwargs_b or kwargs_b.get('top_k') is None
+    # both use the service fingerprint getter (worker-side heavy DSP)
+    assert kwargs_a['fingerprints_get'].__self__ is wb.service
+    assert kwargs_b['fingerprints_get'].__self__ is extended.response_service
+    assert 'cancel' in kwargs_a and 'cancel' in kwargs_b
+
+
 # ---- B15: spectrogram A/B/difference share one grid, reference and axes ----
 def _b15_prepared(x, sr):
     from app.extensions.contracts import (AudioBuffer, PreprocessingConfig,

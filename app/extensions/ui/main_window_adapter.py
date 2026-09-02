@@ -198,32 +198,25 @@ class ExtendedMainWindow(MainWindow):
     def _run_search(self, request):
         if not self.library:
             return
-        from app.extensions.advanced_matching import (rank_by_response,
-                                                      stage1_shortlist)
+        from app.extensions.advanced_matching import response_search
         anchor = self.library_panel.selected_records()
         anchor = anchor[0] if anchor else self.library[0]
         target = np.asarray(anchor.curve_db, dtype=float)
-        max_tone = request['constraints'].get('max_tone_db', 6.0)
-        short = stage1_shortlist(self.library, target, max_tone_db=max_tone,
-                                 top_k=40)
-        records = [r for r, _ in short]
         service = self.response_service
 
         def job(worker):
-            fps = {}
-            for i, r in enumerate(records):
-                if worker.cancelled:
-                    break
-                fps[r.path] = service.fingerprint(r)
-            return rank_by_response(records, fps, service, target,
-                                    weights=request['weights'],
-                                    constraints=request['constraints'],
-                                    targets=request.get('targets'),  # B08
-                                    policy=request['policy'],
-                                    max_tone_db=max_tone)
+            # B16: one shared pipeline (stage1 shortlist -> fingerprint ->
+            # rank). Heavy fingerprint DSP runs here, on the worker thread.
+            return response_search(
+                self.library, service, target,
+                fingerprints_get=service.fingerprint,
+                weights=request['weights'],
+                constraints=request['constraints'],
+                targets=request.get('targets'),  # B08
+                policy=request['policy'],
+                cancel=lambda: worker.cancelled)
 
-        self.status.setText(f'Response search: analyzing {len(records)} '
-                            'shortlisted IRs...')
+        self.status.setText(f'Response search: analyzing shortlist by response...')
         worker = AnalysisWorker(job)
         worker.finished_ok.connect(self._on_search_done)
         worker.failed.connect(lambda rid, m: self.status.setText(

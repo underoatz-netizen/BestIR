@@ -168,6 +168,45 @@ def rank_by_response(records: list[AnalysisResult], fingerprints: dict[str, Resp
     return ranked_eligible + others
 
 
+def response_search(records: list[AnalysisResult], service, target_curve: np.ndarray,
+                    fingerprints_get=None,
+                    weights: dict[str, float] | None = None,
+                    constraints: dict[str, float] | None = None,
+                    targets: dict[str, float] | None = None,
+                    policy: str = 'exclude',
+                    top_k: int = 40,
+                    cancel=None) -> list[RankedCandidate]:
+    """Single shared response-search pipeline (B16).
+
+    Stage 1 shortlists the tone shortlist, fingerprints ONLY those candidates,
+    then ranks them by response. Both the toolbar/main-window adapter and the
+    compare workbench route through this one function so that identical
+    requests (weights/constraints/targets/policy) yield identical shortlist,
+    constraints and explanations.
+
+    ``fingerprints_get`` is the callable used to obtain each candidate's
+    fingerprint (e.g. ``service.fingerprint``). The caller decides where the
+    heavy DSP runs — both production entry points invoke this from inside a
+    worker thread so fingerprinting never blocks the GUI thread.
+
+    ``cancel`` is an optional ``() -> bool`` callback checked between
+    fingerprints so a cancelled worker stops producing shortlisted results.
+    """
+    max_tone_db = (constraints or {}).get('max_tone_db', 6.0)
+    short = stage1_shortlist(records, target_curve, max_tone_db=max_tone_db,
+                             top_k=top_k)
+    short_records = [r for r, _ in short]
+    fps: dict[str, ResponseFingerprint] = {}
+    for r in short_records:
+        if cancel is not None and cancel():
+            break
+        fps[r.path] = fingerprints_get(r)
+    return rank_by_response(short_records, fps, service, target_curve,
+                            weights=weights, constraints=constraints,
+                            targets=targets, policy=policy,
+                            max_tone_db=max_tone_db)
+
+
 def pair_search(records: list[AnalysisResult], anchor: AnalysisResult,
                 fingerprints: dict[str, ResponseFingerprint], service,
                 max_tone_db: float = 3.0, top_k: int = 5
