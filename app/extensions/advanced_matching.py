@@ -85,7 +85,9 @@ def rank_by_response(records: list[AnalysisResult], fingerprints: dict[str, Resp
     weights = weights or {'tone': 1.0, 'd20': 0.0, 'attack': 0.0,
                           'boxiness': 0.0, 'gd_spread': 0.0}
     constraints = constraints or {}
-    targets = targets or {}
+    # B08: desired targets are immutable — the median fallback below must
+    # never mutate the caller's dict (every entry point forwards a snapshot).
+    targets = dict(targets or {})
     for key, feat_name in (('d20', 'd20_low_ms'),
                            ('attack', 'time_to_peak_ms'),
                            ('boxiness', 'boxiness_persistence_excess_db'),

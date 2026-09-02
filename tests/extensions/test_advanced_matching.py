@@ -84,6 +84,49 @@ def test_tight_ranks_above_boomy_for_tightness_weight(tmp_path):
         (top[0].breakdown.explain(), top[0].record.path)
 
 
+def test_b08_ranking_follows_desired_targets_not_library_median():
+    """B08 gate: synthetic candidates rank by the DESIRED response target, not
+    by the library median, and the caller's targets dict is never mutated."""
+    from types import SimpleNamespace
+
+    from app.extensions.contracts import (FeatureValue, ResponseFingerprint,
+                                          SourceKey)
+
+    def record(name):
+        return SimpleNamespace(path=str(name), curve_db=np.zeros(96),
+                               flatness_db=1.0)
+
+    def fp(name, d20_ms):
+        return ResponseFingerprint(
+            key=SourceKey(str(name), 0, 0, 48000, 1), version='test',
+            cfg_hash='test', transient={},
+            decay={'d20_low_ms': FeatureValue(float(d20_ms), True, '')},
+            phase={})
+
+    r_lo, r_mid, r_hi = record('lo'), record('mid'), record('hi')
+    d20_values = {'lo': 10.0, 'mid': 50.0, 'hi': 90.0}
+    records = [r_lo, r_mid, r_hi]
+    fps = {r.path: fp(r.path, v) for r, v in zip(records, d20_values.values())}
+    assert float(np.median(list(d20_values.values()))) == 50.0   # library median
+    weights = {'tone': 0.0, 'd20': 1.0}    # only d20 decides the order
+
+    def winner(desired_d20):
+        targets = {'d20': desired_d20}
+        out = rank_by_response(records, fps, None, np.zeros(96),
+                               weights=weights, targets=targets,
+                               policy='exclude')
+        eligible = [c for c in out if not c.excluded]
+        assert eligible, [c.reason for c in out]
+        assert targets == {'d20': desired_d20}, \
+            'rank_by_response mutated the caller targets dict'
+        return eligible[0].record.path
+
+    # desired 10 ms wins despite the library median being 50 ms
+    assert winner(10.0) == r_lo.path
+    # same library, opposite desired target -> opposite winner
+    assert winner(90.0) == r_hi.path
+
+
 def test_missing_data_reject_policy(tmp_path):
     tight, boomy = _tight_vs_boomy(tmp_path)
     records = [tight, boomy]

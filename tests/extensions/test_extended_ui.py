@@ -231,6 +231,53 @@ def test_b04_valid_blend_without_reliable_bins_is_unknown(qapp):
     assert not any(label in no_data_text for label in ('safe', 'low'))
 
 
+def test_b04_moderate_cancellation_chip_shows_medium(qapp):
+    """B04 threshold bands: a 3..6 dB positive loss at the active ratio must
+    surface as 'Medium' (warn), and the endpoint ratio of the same blend must
+    flip back to 'Safe' — the chip follows the current slider ratio."""
+    from app.extensions.contracts import (AnalysisStatus, AudioBuffer,
+                                          PairComparisonConfig,
+                                          PreprocessingConfig, SourceKey)
+    from app.extensions.pair_compare import compare_pair, predict_blend
+    from app.extensions.preprocessing import prepare
+    from app.extensions.ui.phase_blend_view import PhaseBlendView
+    from tests.extensions import fixtures as fx
+
+    def prepared(name, data):
+        samples = np.asarray(data, dtype=np.float64)[:, None].copy()
+        samples.setflags(write=False)
+        return prepare(
+            AudioBuffer(SourceKey(name, 0, 0, fx.SR, 1), samples),
+            PreprocessingConfig(),
+        )
+
+    signal = fx.decay_fixture(100.0, 0.02, n=24000, delay_ms=2.0)
+    a = prepared('a', signal)
+    b = prepared('b', -0.35 * np.asarray(signal, dtype=np.float64))
+    cfg = PairComparisonConfig(blend_ratios=(0.0, 0.5, 1.0))
+    pair = compare_pair(a, b, cfg)
+    blend = predict_blend(a, b, cfg, alignment='raw')
+    assert pair.status == blend.status == AnalysisStatus.OK
+    mid_loss = float(blend.risk_by_ratio[0.5].worst_cancellation_db)
+    assert 3.0 <= mid_loss < 6.0, mid_loss   # moderate, not deep
+
+    view = PhaseBlendView()
+    view.show_blend(pair, blend)
+    view.ratio_slider.setValue(50)
+    qapp.processEvents()
+
+    chip_text = view.comb_chip.text().lower()
+    assert 'medium' in chip_text, chip_text
+    assert not any(marker in chip_text for marker
+                   in ('safe', 'high', 'no data', 'unknown'))
+
+    view.ratio_slider.setValue(0)
+    qapp.processEvents()
+    endpoint_text = view.comb_chip.text().lower()
+    assert any(marker in endpoint_text for marker in ('safe', 'low'))
+    assert endpoint_text != chip_text
+
+
 def test_stale_result_is_rejected(extended):
     extended.show_workbench()
     wb = extended._workbench

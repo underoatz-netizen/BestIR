@@ -74,6 +74,24 @@ def _inverse_polarity_loss_db(ratio_b):
     return float(20.0 * np.log10(expected / actual))
 
 
+def _scaled_cancellation_loss_db(ratio_b, k):
+    """Independent analytic power-sum deficit for B = k*A (phase-locked,
+    amplitude-scaled): each bin satisfies HB = k*HA, so the deficit
+        20*log10(sqrt(gA^2 + (gB*k)^2) / |gA + gB*k|)
+    is constant across reliable bins and never depends on the FFT length,
+    windowing, or the production risk loop."""
+    g_a, g_b = 1.0 - ratio_b, ratio_b
+    expected = np.hypot(g_a, g_b * k)
+    actual = abs(g_a + g_b * k)
+    return float(20.0 * np.log10(expected / max(actual, 1e-30)))
+
+
+def _scaled_phase_locked_pair(k):
+    """(prepared_a, prepared_b) with prepared_b == k * prepared_a."""
+    signal = fx.decay_fixture(100.0, 0.02, n=24000, delay_ms=2.0)
+    return _prep(signal), _prep(k * np.asarray(signal, dtype=np.float64))
+
+
 # ---- phase ---------------------------------------------------------------------
 def test_pure_delay_group_delay_matches_injected_delay():
     # delayed dirac: after onset alignment the impulse sits 1 ms after time
@@ -352,6 +370,86 @@ def test_b04_cancellation_evidence_tracks_each_blend_ratio():
     assert abs(losses[0.0] - expected[0.0]) < 0.25
     assert losses[0.5] > 24.0
     assert abs(losses[1.0] - expected[1.0]) < 0.25
+
+
+def test_b04_cancellation_loss_is_positive_and_hits_all_threshold_bands():
+    """B04: worst_cancellation_db is a POSITIVE loss magnitude (dB below the
+    power-sum expectation). A phase-locked scaled pair B = -0.35*A must land
+    in the UI 'moderate' band (3..6 dB) at 50/50 and 'safe' (< 3 dB) at the
+    0%/100% endpoints — with every ratio reported against its own evidence."""
+    k = -0.35
+    a, b = _scaled_phase_locked_pair(k)
+    ratios = (0.0, 0.25, 0.5, 0.75, 1.0)
+    pred = predict_blend(a, b, PairComparisonConfig(blend_ratios=ratios),
+                         alignment='raw')
+    assert pred.status == AnalysisStatus.OK
+
+    for ratio in ratios:
+        loss = _ratio_cancellation_loss(pred, ratio)
+        assert loss >= 0.0, (ratio, loss)
+        expected = _scaled_cancellation_loss_db(ratio, k)
+        assert abs(loss - expected) < 0.5, (ratio, loss, expected)
+
+    mid_loss = _ratio_cancellation_loss(pred, 0.5)
+    assert 3.0 <= mid_loss < 6.0, mid_loss          # moderate band
+    assert _ratio_cancellation_loss(pred, 0.0) < 3.0  # safe endpoint
+    assert _ratio_cancellation_loss(pred, 1.0) < 3.0  # safe endpoint
+    # moderate loss alone must not flag >6 dB notch bins
+    assert pred.risk_by_ratio[0.5].notch_freqs == ()
+
+
+def test_b04_deep_cancellation_crosses_high_threshold_and_marks_notches():
+    """B04: full inversion at 50/50 is deep — beyond the UI High threshold
+    (>= 6 dB) and past the severe-warning level (> 12 dB) — and surfaces the
+    notch bins used by the view."""
+    a, b = _scaled_phase_locked_pair(-1.0)
+    pred = predict_blend(a, b, PairComparisonConfig(blend_ratios=(0.5,)),
+                         alignment='raw')
+    assert pred.status == AnalysisStatus.OK
+    loss = pred.worst_cancellation_db
+    assert loss is not None
+    assert loss >= 6.0, loss    # High threshold
+    assert loss > 12.0, loss    # severe-warning threshold
+    assert len(pred.notch_freqs) > 0
+
+
+def test_b04_cancellation_risk_depends_on_alignment():
+    """B04: the same pair at the same ratio must report different risk for
+    different alignments — raw native timing shows deep comb notches while the
+    suggested measured alignment restores a constructive safe mix."""
+    a, b, _ = _full_buffer_delayed_pair(delay_samples=96)
+    pa, pb = _prep(a), _prep(b)
+    cfg = PairComparisonConfig(blend_ratios=(0.5,))
+    raw = predict_blend(pa, pb, cfg, alignment='raw')
+    suggested = predict_blend(pa, pb, cfg, alignment='suggested')
+    assert raw.status == suggested.status == AnalysisStatus.OK
+
+    raw_loss = _ratio_cancellation_loss(raw, 0.5)
+    suggested_loss = _ratio_cancellation_loss(suggested, 0.5)
+    assert raw_loss > 12.0, raw_loss        # unaligned mix: deep comb
+    assert suggested_loss < 3.0, suggested_loss  # aligned mix: safe
+
+
+def test_b04_cancellation_unknown_state_for_every_ratio():
+    """B04: no reliable bins in the risk band -> the risk is Unknown (None)
+    for EVERY configured ratio — never a fabricated Safe/0 value."""
+    signal = fx.decay_fixture(150.0, 0.02, n=24000)
+    pa, pb = _prep(signal), _prep(signal.copy())
+    ratios = (0.0, 0.5, 1.0)
+    cfg = PairComparisonConfig(
+        blend_ratios=ratios, risk_band=(float(fx.SR), float(2 * fx.SR)),
+    )
+    pred = predict_blend(pa, pb, cfg, alignment='raw')
+    assert pred.status == AnalysisStatus.OK
+    assert pred.worst_cancellation_db is None
+    assert pred.worst_cancellation_freq is None
+    assert pred.notch_freqs == ()
+    for ratio in ratios:
+        risk = pred.risk_by_ratio[ratio]
+        assert risk.worst_cancellation_db is None
+        assert risk.worst_cancellation_freq is None
+        assert risk.notch_freqs == ()
+        assert risk.sensitivity == {'-1': None, '+1': None}
 
 
 def test_constructive_blend_low_risk():
