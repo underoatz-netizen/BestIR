@@ -10,9 +10,9 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QPushButton, QSlider, QTextEdit,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QPushButton, QSlider,
+                               QTextEdit, QVBoxLayout, QWidget)
 
 from app.extensions.contracts import AnalysisStatus
 
@@ -72,6 +72,9 @@ class PhaseBlendView(QWidget):
     export_aligned_b = Signal()
     export_blend = Signal()
     export_report = Signal()
+    # U06: the user picked an alignment mode whose data is not present in the
+    # current bundle — the owner (workbench) should recompute that alignment.
+    alignment_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,26 +93,30 @@ class PhaseBlendView(QWidget):
                 padding: 6px;
             }}
         """)
-        c_lay = QHBoxLayout(control_card)
+        c_lay = QVBoxLayout(control_card)
         c_lay.setContentsMargins(10, 6, 10, 6)
-        c_lay.setSpacing(10)
+        c_lay.setSpacing(6)
+
+        ratio_row = QHBoxLayout()
+        ratio_row.setSpacing(10)
+        c_lay.addLayout(ratio_row)
 
         lbl = QLabel('Blend Ratio:')
         lbl.setStyleSheet(f"color: {ACCENT_GOLD}; font-weight: 600; font-size: 9pt;")
-        c_lay.addWidget(lbl)
+        ratio_row.addWidget(lbl)
 
         a_tag = QLabel('100% A')
         a_tag.setStyleSheet(f"color: {COLOR_IR_A}; font-weight: 600; font-size: 8pt;")
-        c_lay.addWidget(a_tag)
+        ratio_row.addWidget(a_tag)
 
         self.ratio_slider = QSlider(Qt.Horizontal)
         self.ratio_slider.setRange(0, 100)
         self.ratio_slider.setValue(50)
-        c_lay.addWidget(self.ratio_slider, 1)
+        ratio_row.addWidget(self.ratio_slider, 1)
 
         b_tag = QLabel('100% B')
         b_tag.setStyleSheet(f"color: {COLOR_IR_B}; font-weight: 600; font-size: 8pt;")
-        c_lay.addWidget(b_tag)
+        ratio_row.addWidget(b_tag)
 
         self.ratio_label = QLabel('Blend: 50% B')
         self.ratio_label.setStyleSheet(f"""
@@ -122,10 +129,51 @@ class PhaseBlendView(QWidget):
             font-weight: bold;
             font-size: 8.5pt;
         """)
-        c_lay.addWidget(self.ratio_label)
+        ratio_row.addWidget(self.ratio_label)
 
         self.comb_chip = ValidityChip(text='Comb Risk: No data', state='invalid')
-        c_lay.addWidget(self.comb_chip)
+        ratio_row.addWidget(self.comb_chip)
+
+        # U06: alignment mode selector — cached | raw | suggested. Selecting a
+        # mode whose data is not in the current bundle emits alignment_requested
+        # so the owner can recompute it (this view never runs DSP itself).
+        align_row = QHBoxLayout()
+        align_row.setSpacing(8)
+        align_lbl = QLabel('Alignment:')
+        align_lbl.setStyleSheet(
+            f"color: {TEXT_MUTED}; font-weight: 600; font-size: 8.5pt;")
+        align_row.addWidget(align_lbl)
+        self.alignment_combo = QComboBox()
+        for value, label in (('cached', 'Cached (current data)'),
+                             ('raw', 'Raw (no alignment)'),
+                             ('suggested', 'Suggested alignment')):
+            self.alignment_combo.addItem(label, value)
+        self.alignment_combo.setCurrentIndex(0)   # 'cached' before any signal
+        self.alignment_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {SURFACE_RAISED};
+                border: 1px solid {BORDER_CARD};
+                border-radius: 6px;
+                padding: 3px 8px;
+                color: {TEXT_MAIN};
+                font-family: {FONT_FAMILY_PRIMARY};
+                font-size: 8.5pt;
+            }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {SURFACE_RAISED};
+                color: {TEXT_MAIN};
+                border: 1px solid {BORDER_CARD};
+                selection-background-color: {ACCENT_GOLD};
+                selection-color: #000000;
+            }}
+        """)
+        self.alignment_combo.setToolTip(
+            'Cached uses the blend data already in the bundle; Raw and '
+            'Suggested request a recompute when their data is not cached yet.')
+        align_row.addWidget(self.alignment_combo)
+        align_row.addStretch(1)
+        c_lay.addLayout(align_row)
 
         self.info = QTextEdit()
         self.info.setReadOnly(True)
@@ -183,12 +231,15 @@ class PhaseBlendView(QWidget):
         self._pair_result = None
         self._blend_result = None
         self.ratio_slider.valueChanged.connect(self._update_blend_plot)
+        self.alignment_combo.currentIndexChanged.connect(
+            self._on_alignment_changed)
 
     def _make_plot(self, label):
         p = pg.PlotWidget(background=SURFACE_CARD)
         p.setLabel('bottom', 'Frequency (Hz)', color=TEXT_MUTED)
         p.setLabel('left', label, color=TEXT_MUTED)
         p.showGrid(x=True, y=True, alpha=0.15)
+        p.addLegend(offset=(10, 10))     # U06: each panel identifies its curves
         p.getAxis('bottom').setTicks(
             [[(float(np.log10(v)), lbl) for v, lbl in _TICKS]])
         return p
@@ -222,8 +273,10 @@ class PhaseBlendView(QWidget):
         if not _result_is_ok(pair_result) or not _blend_is_renderable(blend_result):
             self._blend_result = None
             self._show_blend_unavailable(pair_result, blend_result)
+            self._sync_alignment_combo()
             return
         self._blend_result = blend_result
+        self._sync_alignment_combo()
         self._update_blend_plot()
         self._update_info()
 
@@ -245,17 +298,56 @@ class PhaseBlendView(QWidget):
         for b in (self.btn_export_b, self.btn_export_blend, self.btn_export_report):
             b.setEnabled(enabled)
 
+    # ---- U06 alignment selector ---------------------------------------------
+    def _alignment_available(self, mode: str) -> bool:
+        """True when the requested alignment mode is already present in the
+        cached bundle — no recompute needed."""
+        if mode == 'cached':
+            return _blend_is_renderable(self._blend_result)
+        return (_blend_is_renderable(self._blend_result) and
+                getattr(self._blend_result, 'alignment', None) == mode)
+
+    def _on_alignment_changed(self, *_):
+        mode = self.alignment_combo.currentData()
+        if self._alignment_available(mode):
+            return
+        self.alignment_requested.emit(mode)
+
+    def _sync_alignment_combo(self):
+        """Reflect the current bundle's alignment without emitting a request."""
+        if _blend_is_renderable(self._blend_result):
+            mode = getattr(self._blend_result, 'alignment', None)
+            if mode not in ('raw', 'suggested'):
+                mode = 'cached'
+        else:
+            mode = 'cached'
+        self.alignment_combo.blockSignals(True)
+        idx = self.alignment_combo.findData(mode)
+        if idx >= 0:
+            self.alignment_combo.setCurrentIndex(idx)
+        self.alignment_combo.blockSignals(False)
+
     def _update_blend_plot(self):
         blend = self._blend_result
         self._blend.clear()
         if not _blend_is_renderable(blend):
             return
+        n = len(blend.ratios)
         pct = self.ratio_slider.value()
-        idx = int(round(pct / 100.0 * (len(blend.ratios) - 1)))
-        self.ratio_label.setText(f'Blend: {int(blend.ratios[idx] * 100)}% B')
+        idx = int(round(pct / 100.0 * (n - 1)))
+        # U06: snap the slider to the exact position of the nearest existing
+        # ratio value so the displayed percentage always matches a real blend.
+        snapped_pct = idx / (n - 1) * 100.0 if n > 1 else 0.0
+        if abs(pct - snapped_pct) >= 1.0:
+            self.ratio_slider.setValue(int(round(snapped_pct)))
+            return      # the re-entrant valueChanged renders the snapped state
+        ratio = float(blend.ratios[idx])
+        pct_text = f'{round(ratio * 100)}% B'
+        self.ratio_label.setText(f'Blend: {pct_text}')
         lx = self._lx(blend.freqs)
         self._blend.plot(x=lx, y=blend.magnitude_db[idx],
-                         pen=pg.mkPen(QColor(ACCENT_GOLD), width=2.5))
+                         pen=pg.mkPen(QColor(ACCENT_GOLD), width=2.5),
+                         name=f'Blend ({pct_text})')
         risk = self._active_risk(blend)
         for f in _risk_value(risk, 'notch_freqs', ())[:8]:
             line = pg.InfiniteLine(pos=float(np.log10(max(f, 1e-2))), angle=90,
@@ -270,6 +362,7 @@ class PhaseBlendView(QWidget):
         self.ratio_label.setText('Blend: No data')
         self.comb_chip.set_state('invalid', 'Comb Risk: No data', reason)
         self.info.setPlainText(reason)
+        self._sync_alignment_combo()
 
     def _update_info(self):
         pair, blend = self._pair_result, self._blend_result

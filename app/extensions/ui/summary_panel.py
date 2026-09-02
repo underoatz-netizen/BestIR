@@ -1,6 +1,10 @@
 """Summary tab: metric table A vs B with validity and main differences (WP-07).
 
 Enhanced with Boro UI design tokens and tactile metric cards.
+U08: differences are ranked by a dimensionless normalized effect (never by
+raw unit sizes across ms/dB/Hz/%), n/a cells show their reason inline, and
+the prose describes which measurement is higher without claiming the higher
+value sounds better.
 """
 from __future__ import annotations
 
@@ -39,6 +43,38 @@ _TOP_CARDS = [
     ('Group Delay Median', 'gd_median_ms', 'ms'),
     ('Phase Coverage', 'gd_valid_coverage', '%'),
 ]
+
+#: per-feature acoustic reference scale so mixed-unit deltas (ms, dB, Hz, %)
+#: rank on one dimensionless axis (U08) — same philosophy as the matching
+#: scales in advanced_matching, kept local and display-only.
+_EFFECT_SCALE = {
+    'time_to_peak_ms': 2.0,
+    'rise_time_ms': 2.0,
+    'early_energy_5ms': 0.2,
+    'early_late_ratio': 1.0,
+    'centroid_ms': 5.0,
+    'crest_factor': 6.0,          # dB display scale
+    'd20_low_ms': 40.0,
+    'boxiness_persistence_excess_db': 6.0,
+    'boxiness_ridge_hz': 200.0,
+    'gd_median_ms': 2.0,
+    'gd_spread_ms': 2.0,
+    'gd_valid_coverage': 20.0,    # percentage points
+}
+
+
+def normalized_effect(feature: str, delta: float, val_a: float | None,
+                      val_b: float | None) -> float:
+    """Dimensionless effect magnitude |delta| / reference scale (U08).
+
+    Unknown features fall back to the relative change against the larger
+    display value so the sort never compares raw unit sizes.
+    """
+    scale = _EFFECT_SCALE.get(feature)
+    if scale is None:
+        ref = max(abs(val_a or 0.0), abs(val_b or 0.0), 1e-9)
+        scale = ref
+    return abs(delta) / max(scale, 1e-9)
 
 
 class SummaryPanel(QWidget):
@@ -111,6 +147,9 @@ class SummaryPanel(QWidget):
                 font-size: 9.5pt;
                 line-height: 1.5;
             }}
+            QTextEdit:focus {{
+                border: 1px solid {ACCENT_GOLD};
+            }}
         """)
         wc_lay.addWidget(self.why, 1)
         splitter.addWidget(why_container)
@@ -137,27 +176,33 @@ class SummaryPanel(QWidget):
             fb = fp_b.all_features().get(feat) if fp_b else None
             va = fa.value if fa and fa.valid and fa.value is not None else None
             vb = fb.value if fb and fb.valid and fb.value is not None else None
+            na = fa.note if fa and not fa.valid else ''
+            nb = fb.note if fb and not fb.valid else ''
             # display-only unit conversion; raw cached values are never altered
             da = to_display_value(feat, va, unit)
             db = to_display_value(feat, vb, unit)
+            # U08: invalid cells show their reason inline, not only in tooltips
+            ta = 'n/a' if da is None else format_cell(da, unit)
+            if da is None and na:
+                ta = f'n/a ({na})'
+            tb = 'n/a' if db is None else format_cell(db, unit)
+            if db is None and nb:
+                tb = f'n/a ({nb})'
             if va is None and vb is None:
                 delta_text = 'n/a'
             elif va is None:
-                delta_text = 'A invalid'
+                delta_text = f'A invalid ({na})' if na else 'A invalid'
             elif vb is None:
-                delta_text = 'B invalid'
+                delta_text = f'B invalid ({nb})' if nb else 'B invalid'
             elif da is None or db is None:
                 delta_text = 'n/a'   # valid raw but not representable in unit
             else:
                 d = da - db
                 delta_text = format_cell(d, unit, signed=True, sig=3)
-                diffs.append((abs(d), label, d, da, db, unit))
-            rows.append((label,
-                         'n/a' if da is None else format_cell(da, unit),
-                         'n/a' if db is None else format_cell(db, unit),
-                         delta_text,
-                         (fa.note if fa and not fa.valid else ''),
-                         (fb.note if fb and not fb.valid else '')))
+                # U08: dimensionless effect, never raw cross-unit magnitudes
+                diffs.append((normalized_effect(feat, d, da, db),
+                              label, d, da, db, unit))
+            rows.append((label, ta, tb, delta_text, na, nb))
         self.table.setRowCount(len(rows))
         for i, (label, ta, tb, td, na, nb) in enumerate(rows):
             for j, text in enumerate((label, ta, tb, td)):
@@ -170,13 +215,22 @@ class SummaryPanel(QWidget):
             if nb:
                 self.table.item(i, 2).setToolTip(f'B: {nb}')
 
-        # Format Difference Explanation
+        # Format Difference Explanation (neutral, dimensionless ranking)
         diffs.sort(reverse=True)
         lines = []
-        for _, label, d, da, db, unit in diffs[:6]:
+        for _effect, label, d, da, db, unit in diffs[:6]:
             u_str = unit_suffix(unit)
-            winner = name_a if d > 0 else name_b
-            lines.append(f'• {label}: {winner} is higher by '
-                         f'{format_number(abs(d), unit, sig=3)}{u_str} '
-                         f'({format_number(da, unit)} vs {format_number(db, unit)})')
-        self.why.setPlainText('\n\n'.join(lines) or 'No measurable acoustic differences.')
+            higher = name_a if d > 0 else name_b
+            # U08: describe the measurement only — no "winner"/"better"
+            lines.append(
+                f'• {label}: {higher} is higher by '
+                f'{format_number(abs(d), unit, sig=3)}{u_str} '
+                f'({name_a}: {format_number(da, unit)} vs '
+                f'{name_b}: {format_number(db, unit)})')
+        body = '\n'.join(lines)
+        if body:
+            self.why.setPlainText(
+                'Ranked by normalized effect; a higher value is a '
+                'measurement, not a tone-quality judgement.\n\n' + body)
+        else:
+            self.why.setPlainText('No measurable acoustic differences.')

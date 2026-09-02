@@ -62,15 +62,48 @@ COLOR_INVALID_BORDER = '#661210'
 
 
 BORO_QSS = f"""
-* {{
-    outline: none;
-}}
-
-QDialog, QWidget {{
+/* U09: object-scoped component styling only —
+ * - no blanket `* {{ outline: none }}` (that erased every native focus ring);
+ * - no bare `QWidget {{ background/border }}` rule (that boxed every label and
+ *   intermediate container, producing nested boxes);
+ * the canvas is painted by top-level windows/dialogs and the explicit
+ * #boroCanvas component; labels stay transparent inside cards, and every
+ * interactive component carries its own :focus / :checked / :unchecked state.
+ */
+QMainWindow, QDialog, QWidget#boroCanvas {{
     background-color: {BG_CANVAS};
     color: {TEXT_BODY};
     font-family: {FONT_FAMILY_PRIMARY};
     font-size: 9pt;
+}}
+
+QLabel {{
+    background: transparent;
+    border: none;
+}}
+
+/* ---- U09: object-scoped interaction states ----
+ * every interactive component carries its own focus / checked / unchecked
+ * state so the theme never relies on a blanket outline/background wipe:
+ * - gold focus ring on keyboard-focusable controls (Tab/Shift+Tab visible);
+ * - checkbox indicator has an explicit unchecked state distinct from
+ *   checked, plus a hover cue; space toggles remain native.
+ */
+QPushButton:focus {{
+    border: 1px solid {ACCENT_GOLD};
+}}
+QPushButton#primaryGoldBtn:focus, QPushButton[primary="true"]:focus {{
+    border: 1px solid #ffffff;
+}}
+QTextEdit:focus, QListWidget:focus, QTableWidget:focus, QTableView:focus {{
+    border: 1px solid {ACCENT_GOLD};
+}}
+QCheckBox::indicator:unchecked {{
+    background: {SURFACE_RAISED};
+    border: 1px solid {BORDER_CARD};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {ACCENT_GOLD};
 }}
 
 /* ---- Tactile Boro Cards ---- */

@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
+                               QVBoxLayout, QWidget)
 
 from app.extensions.spectrogram import (compare_spectrograms,
                                         spectrogram_error)
@@ -26,6 +26,31 @@ _TICKS = [(20, '20'), (50, '50'), (100, '100'), (200, '200'), (500, '500'),
 
 _LUT = None
 _DIFF_LUT = None
+
+# U03: shared Boro styling for the visibility / dB-range selectors.
+_COMBO_QSS = f"""
+    QComboBox {{
+        background-color: {SURFACE_RAISED};
+        border: 1px solid {BORDER_CARD};
+        border-radius: 6px;
+        padding: 3px 8px;
+        color: {TEXT_MAIN};
+        font-family: {FONT_FAMILY_PRIMARY};
+        font-size: 8.5pt;
+    }}
+    QComboBox::drop-down {{ border: none; width: 16px; }}
+    QComboBox QAbstractItemView {{
+        background-color: {SURFACE_RAISED};
+        color: {TEXT_MAIN};
+        border: 1px solid {BORDER_CARD};
+        selection-background-color: {ACCENT_GOLD};
+        selection-color: #000000;
+    }}
+"""
+
+_VISIBILITY_OPTIONS = (('all', 'All panels'), ('A', 'IR A only'),
+                       ('B', 'IR B only'), ('diff', 'Difference only'))
+_DB_RANGE_OPTIONS = (40, 50, 60, 70, 80)
 
 
 def _lut():
@@ -99,10 +124,45 @@ class SpectrogramView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plots = {}
+        self._cards = {}
         self._pair_unavailable = False
+        self._last_pair = None
+        self._last_dyn = 60.0
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(6)
+
+        # U03: control row — panel visibility + shared dB-range rerender.
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        show_lbl = QLabel('Show:')
+        show_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 8.5pt;")
+        controls.addWidget(show_lbl)
+        self.view_selector = QComboBox()
+        for value, label in _VISIBILITY_OPTIONS:
+            self.view_selector.addItem(label, value)
+        self.view_selector.setCurrentIndex(0)   # 'all' before any signal
+        self.view_selector.setStyleSheet(_COMBO_QSS)
+        self.view_selector.setToolTip(
+            'Choose which spectrogram panels are visible. Hidden panels keep '
+            'their rendered heatmap (axes stay shared).')
+        controls.addWidget(self.view_selector)
+
+        range_lbl = QLabel('dB range:')
+        range_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 8.5pt;")
+        controls.addWidget(range_lbl)
+        self.range_selector = QComboBox()
+        for value in _DB_RANGE_OPTIONS:
+            self.range_selector.addItem(f'{value} dB', value)
+        self.range_selector.setCurrentIndex(2)  # 60 dB default
+        self.range_selector.setStyleSheet(_COMBO_QSS)
+        self.range_selector.setToolTip(
+            'Shared dB window below the common reference; rerenders the A/B '
+            'heatmaps on the same shared grid (Difference keeps its own '
+            'symmetric scale).')
+        controls.addWidget(self.range_selector)
+        controls.addStretch(1)
+        main_layout.addLayout(controls, 0)
 
         # 3 Panels Row
         grid_row = QHBoxLayout()
@@ -123,6 +183,7 @@ class SpectrogramView(QWidget):
                     border-radius: 8px;
                 }}
             """)
+            self._cards[key] = card
             c_lay = QVBoxLayout(card)
             c_lay.setContentsMargins(6, 6, 6, 6)
             c_lay.setSpacing(4)
@@ -154,6 +215,27 @@ class SpectrogramView(QWidget):
             }}
         """)
         main_layout.addWidget(self._diff_label, 0)
+
+        # U03: user controls rerender on the cached pair only — they never
+        # recompute the comparison themselves (B15 logic stays untouched).
+        self.view_selector.currentIndexChanged.connect(self._apply_visibility)
+        self.range_selector.currentIndexChanged.connect(self._on_range_changed)
+
+    # ---- U03 controls -------------------------------------------------------
+    def _apply_visibility(self, *_):
+        """Show/hide the A/B/Diff cards; hidden panels keep their heatmap and
+        the shared axes (visibility is purely a display concern)."""
+        choice = self.view_selector.currentData()
+        for key, card in self._cards.items():
+            card.setVisible(choice == 'all' or choice == key)
+
+    def _on_range_changed(self, *_):
+        """Rerender the cached pair with the selected shared dB window."""
+        if self._last_pair is None:
+            return
+        dyn = float(self.range_selector.currentData())
+        self._last_dyn = dyn
+        self.show_pair(self._last_pair[0], self._last_pair[1], dyn=dyn)
 
     # ---- rendering helpers -------------------------------------------------
     @staticmethod
@@ -190,6 +272,8 @@ class SpectrogramView(QWidget):
 
     # ---- public API --------------------------------------------------------
     def show_pair(self, spec_a, spec_b, dyn: float = 60.0):
+        self._last_pair = (spec_a, spec_b)
+        self._last_dyn = dyn
         for plot in self._plots.values():
             plot.clear()
         cmp = compare_spectrograms(spec_a, spec_b)
