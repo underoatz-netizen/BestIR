@@ -157,14 +157,19 @@ with patch.object(QFileDialog, 'getExistingDirectory', return_value='') as choos
     wb.phase_blend.btn_export_report.click()
     results['real_export_button_clicks'] = {'clicks': 3, 'directory_dialog_calls': choose.call_count}
 
-# Keep the original request token then change B before the debounce launches new work.
+# Keep the original request token then change B before the debounce launches
+# new work.  B06 gate: the queued result for the OLD pair (request id 42) must
+# be rejected — the header must reflect the newly selected B and the old pair
+# must not become the active/exportable result.
 wb.set_pair(records[0], records[2])
 wb._debounce.stop()
-wb._on_pair_done(42, result)
+wb._on_pair_done(42, result)   # stale delivery must be ignored
 results['stale_during_debounce'] = {
     'selected_b': Path(wb.rec_b.path).name,
-    'displayed_pair_b': Path(wb._last_pair.key_b.path).name,
+    'displayed_pair_b': (None if wb._last_pair is None
+                         else Path(wb._last_pair.key_b.path).name),
     'status': wb.status.text(),
+    'stale_pair_rejected': wb._last_pair is None,
 }
 wb.set_pair(records[0], records[1])
 wb._debounce.stop()
