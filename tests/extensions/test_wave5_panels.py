@@ -29,6 +29,14 @@ def qapp():
 
 
 class TestResponseSearchPanel:
+    def test_desired_response_group_is_embedded_not_a_popup(self, qapp):
+        from app.extensions.ui.response_search_panel import ResponseSearchPanel
+
+        panel = ResponseSearchPanel()
+        assert panel.simple_group.parentWidget() is not None
+        assert not panel.simple_group.isWindow()
+        panel.close()
+
     def test_simple_advanced_payload_keys_and_set_a_signal(self, qapp):
         from app.extensions.contracts import RankedCandidate
         from app.extensions.ui.response_search_panel import ResponseSearchPanel

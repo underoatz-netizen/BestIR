@@ -66,7 +66,7 @@ def test_stereo_channels_remain_distinct():
     # per-channel data preserved: cross-correlation would find the 7-sample lag
     ch1 = res.data[:, 0]
     ch2 = res.data[:, 1]
-    n = 4000
+    n = min(4000, len(ch1), len(ch2))
     cc = np.correlate(ch2[:n] - ch2[:n].mean(), ch1[:n] - ch1[:n].mean(), 'full')
     lag = int(np.argmax(np.abs(cc)) - (n - 1))
     assert lag == 7
@@ -116,12 +116,26 @@ def test_sustained_long_ir_truncated_to_post_onset_cap():
     assert res.onset < res.data.shape[0]
 
 
+def test_long_natural_decay_keeps_tail_without_filling_cap():
+    sr = fx.SR
+    x = fx.decay_fixture(80.0, 0.01, n=2 * sr)  # source longer than the cap
+    cfg = PreprocessingConfig(max_length_ms=200.0)
+    res = _prep(x, cfg=cfg)
+    rms_win = max(1, int(0.005 * sr))
+    cap_end = res.onset + int(round(cfg.max_length_ms * sr / 1000.0))
+
+    assert res.status == AnalysisStatus.OK
+    assert res.tail_end + rms_win == res.data.shape[0]  # useful tail + guard retained
+    assert res.data.shape[0] < cap_end                  # no needless zero-tail to cap
+    assert not any('truncated' in w.lower() for w in res.warnings)
+
+
 def test_short_decaying_ir_untouched_by_cap():
     x = fx.decay_fixture(80.0, 0.01, n=2400)     # 50 ms decay, shorter than cap
     cfg = PreprocessingConfig(max_length_ms=200.0)
     res = _prep(x, cfg=cfg)
     assert res.status == AnalysisStatus.OK
-    assert res.data.shape[0] == 2400             # whole file kept
+    assert res.data.shape[0] == 2400             # useful tail reaches file end
     assert not any('truncated' in w.lower() for w in res.warnings)
     assert res.tail_end < res.data.shape[0]
     assert res.onset < res.data.shape[0]

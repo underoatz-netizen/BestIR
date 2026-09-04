@@ -102,9 +102,14 @@ def prepare(buffer: AudioBuffer, cfg: PreprocessingConfig) -> PreparedIR:
     # their full useful tail; only tails reaching the cap boundary are truncated.
     max_frames = int(round(cfg.max_length_ms * sr / 1000.0))
     cap_end = min(len(x), onset + max_frames)
-    if tail_end >= cap_end:
+    # cap_end is exclusive.  A warning is meaningful only if there is source
+    # audio beyond the cap and useful signal reaches that boundary.
+    if cap_end < len(x) and tail_end >= cap_end:
         warnings.append('signal truncated to max_length_ms')
-    keep_end = min(cap_end, max(onset + max_frames, tail_end + rms_win))
+    # Keep a small complete-RMS-window guard after a natural decay, rather
+    # than filling every long source up to the post-onset cap.  Sustained
+    # tails still resolve to cap_end because their tail_end reaches the cap.
+    keep_end = min(len(x), cap_end, tail_end + rms_win)
     x = x[:keep_end]
     tail_end = min(tail_end, len(x) - 1)
 

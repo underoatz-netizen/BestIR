@@ -71,11 +71,20 @@ delay_pair = compare_pair(a, late_b, cfg)
 aligned, _ = apply_alignment(late_b, IRProcessingConfig(delay_samples=delay_pair.delay_samples))
 raw = predict_blend(a, late_b, cfg, alignment='raw')
 onset = predict_blend(a, late_b, cfg, alignment='onset')
+# Alignment modes can require different FFT sizes.  Compare on their shared
+# physical frequency range instead of assuming their native bin counts match.
+compare_freqs = np.linspace(max(raw.freqs[0], onset.freqs[0]),
+                            min(raw.freqs[-1], onset.freqs[-1]),
+                            min(len(raw.freqs), len(onset.freqs)))
+raw_mag = np.vstack([np.interp(compare_freqs, raw.freqs, row)
+                     for row in raw.magnitude_db])
+onset_mag = np.vstack([np.interp(compare_freqs, onset.freqs, row)
+                       for row in onset.magnitude_db])
 results['alignment'] = {
     'known_native_delay_samples': 120,
     'reported_delay_samples': delay_pair.delay_samples,
     'export_remaining_peak_delay_samples': int(np.argmax(abs(aligned[:,0])) - np.argmax(abs(a.data[:,0]))),
-    'raw_vs_onset_max_db_difference': float(np.max(abs(raw.magnitude_db - onset.magnitude_db))),
+    'raw_vs_onset_max_db_difference': float(np.max(abs(raw_mag - onset_mag))),
 }
 
 # Same physical tone, two sample rates. Export ratio 100% B must preserve Hz.
@@ -119,12 +128,13 @@ records = sorted(scan_library([str(lib)], LibraryCache(str(OUT/'legacy.json'))),
 cache = FingerprintCache(str(OUT/'response.db'))
 service = ResponseService(cache=cache)
 fp_a = service.fingerprint(records[0])
-from app.extensions.fingerprint import CFG_HASH
+from app.extensions.fingerprint import effective_cfg_hash
+cfg_hash = effective_cfg_hash(service)
 with ThreadPoolExecutor(max_workers=1) as pool:
-    worker_read = pool.submit(cache.get, fp_a.key.signature(), CFG_HASH).result()
-    pool.submit(cache.put, replace(fp_a, key=replace(fp_a.key, path='worker-only')), CFG_HASH).result()
+    worker_read = pool.submit(cache.get, fp_a.key.signature(), cfg_hash).result()
+    pool.submit(cache.put, replace(fp_a, key=replace(fp_a.key, path='worker-only')), cfg_hash).result()
 results['cross_thread_cache'] = {
-    'main_thread_read_ok': cache.get(fp_a.key.signature(), CFG_HASH) is not None,
+    'main_thread_read_ok': cache.get(fp_a.key.signature(), cfg_hash) is not None,
     'worker_read_ok': worker_read is not None,
     'count_after_worker_insert': cache.count(), 'expected_count': 2,
 }

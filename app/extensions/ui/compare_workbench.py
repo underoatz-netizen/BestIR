@@ -17,9 +17,9 @@ import os
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
+                               QScrollArea, QTabWidget, QVBoxLayout, QWidget)
 
 from app.core.analysis import AnalysisResult
 from app.extensions.contracts import (AnalysisStatus, PairComparisonConfig,
@@ -37,6 +37,7 @@ from .summary_panel import SummaryPanel
 from .waveform_view import WaveformView
 from .widgets.ab_header import ABHeaderDeck
 from .workers import AnalysisWorker, PairAnalysisWorker
+from .worker_lifecycle import cancel_and_retain, shutdown
 
 
 def _short(path: str) -> str:
@@ -80,6 +81,10 @@ class CompareWorkbench(QDialog):
         self._last_fp_b = None
         self._spec_workers = {}
         self._retired_workers = []
+        self._search_worker = None
+        self._export_worker = None
+        self._closing = False
+        self._workers_shutdown = False
         self._spec_cache = {}
         self._csd_results = {}
         # B09: A and B CSD results are kept separately; the CSD view renders
@@ -96,6 +101,17 @@ class CompareWorkbench(QDialog):
         self.deck.set_a_requested.connect(self._set_a_from_selection)
         self.deck.set_b_requested.connect(self._set_b_from_selection)
         self.deck.swap_requested.connect(self._swap_ab)
+        self.deck.setMinimumHeight(0)
+        # DPI fix: put the dual-deck header in a horizontal scroll area so long
+        # IR filenames and the Set buttons never force the whole dialog wider
+        # than the monitor at 125-175% scaling.
+        deck_scroll = QScrollArea(self)
+        deck_scroll.setWidgetResizable(True)
+        deck_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        deck_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        deck_scroll.setFrameShape(QFrame.NoFrame)
+        deck_scroll.setWidget(self.deck)
+        deck_scroll.setMinimumHeight(0)
 
         # Legacy compatibility aliases
         self.label_a = self.deck.card_a.name_lbl
@@ -109,6 +125,11 @@ class CompareWorkbench(QDialog):
         self.csd = CsdView()
         self.spectrogram = SpectrogramView()
         self.phase_blend = PhaseBlendView()
+        # DPI fix (125-175%): the Phase & Blend tab has a 2x2 plot grid plus a
+        # control card plus an export group. Wrapped in a vertical scroll area
+        # so its fixed-height plot minimums can never push the export buttons
+        # off the bottom of a short/high-DPI dialog.
+        self.phase_blend._scrolled = self._wrap_scroll(self.phase_blend)
         self.phase_blend.set_export_enabled(False)
         # B05: route the view's export actions into the guarded workbench
         # handlers. Eligibility starts disabled; _invalidate() revokes it on
@@ -125,7 +146,7 @@ class CompareWorkbench(QDialog):
         self.tabs.addTab(self.waveform, '📈 Waveform & Envelope')
         self.tabs.addTab(self.csd, '🌊 CSD Waterfall')
         self.tabs.addTab(self.spectrogram, '🔥 Spectrogram Heatmaps')
-        self.tabs.addTab(self.phase_blend, '⚡ Phase & Blend Prediction')
+        self.tabs.addTab(self.phase_blend._scrolled, '⚡ Phase & Blend Prediction')
         self.tabs.addTab(self.search, '🎯 Response Search')
 
         self.status = QLabel('Select two IRs in the library to populate A/B.')
@@ -142,9 +163,9 @@ class CompareWorkbench(QDialog):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-        layout.addWidget(self.deck)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        layout.addWidget(deck_scroll)
         layout.addWidget(self.tabs, 1)
         layout.addWidget(self.status)
 
@@ -291,25 +312,34 @@ class CompareWorkbench(QDialog):
             and self._result_config_hash(result) == context.tf_cfg.config_hash()
         )
 
-    @staticmethod
-    def _cancel_worker(worker) -> None:
-        cancel = getattr(worker, 'cancel', None)
-        if callable(cancel):
-            cancel()
-
     def _retire_worker(self, worker) -> None:
         if worker is None:
             return
-        if worker not in self._retired_workers:
-            self._retired_workers.append(worker)
-            finished = getattr(worker, 'finished', None)
-            if finished is not None:
-                finished.connect(
-                    lambda retired=worker: self._retired_workers.remove(retired)
-                    if retired in self._retired_workers else None)
-        self._cancel_worker(worker)
+        cancel_and_retain(worker, self._retired_workers)
+
+    def shutdown_workers(self, timeout_ms: int = 200) -> None:
+        """Cooperatively stop all work without risking QThread destruction."""
+        if self._workers_shutdown:
+            return
+        self._workers_shutdown = True
+        self._closing = True
+        self._debounce.stop()
+        workers = [self._pair_worker, self._search_worker, self._export_worker,
+                   *self._spec_workers.values(), *self._retired_workers]
+        self._pair_request_id = None
+        self._pair_worker = None
+        self._search_worker = None
+        self._export_worker = None
+        self._spec_workers.clear()
+        shutdown(workers, self._retired_workers, timeout_ms)
+
+    def closeEvent(self, event):
+        self.shutdown_workers()
+        super().closeEvent(event)
 
     def _invalidate(self):
+        if self._closing or self._workers_shutdown:
+            return
         self._selection_generation += 1
         self._selection_context = self._capture_selection_context()
         self._debounce.stop()
@@ -318,6 +348,12 @@ class CompareWorkbench(QDialog):
         if self._pair_worker is not None:
             self._retire_worker(self._pair_worker)
         self._pair_worker = None
+        # A response-search result belongs to the selection from which it was
+        # requested.  Retire it before clearing the active identity so an old
+        # completion cannot populate the newly selected A/B pair.
+        if self._search_worker is not None:
+            self._retire_worker(self._search_worker)
+        self._search_worker = None
         for worker in self._spec_workers.values():
             self._retire_worker(worker)
         self._spec_workers.clear()
@@ -346,6 +382,8 @@ class CompareWorkbench(QDialog):
 
     # ---- pair pipeline ---------------------------------------------------------
     def _compute_pair(self, context: _SelectionContext | None = None):
+        if self._closing or self._workers_shutdown:
+            return
         context = context or self._selection_context
         if (not self._context_is_current(context) or self.rec_a is None or
                 self.rec_b is None or
@@ -356,18 +394,19 @@ class CompareWorkbench(QDialog):
             self._retire_worker(self._pair_worker)
         a, b = self.rec_a, self.rec_b
         worker = PairAnalysisWorker(self.service, a, b, cfg=context.pair_cfg)
-        worker.finished_ok.connect(
-            lambda request_id, result, ctx=context:
-            self._on_pair_done(request_id, result, ctx))
-        worker.failed.connect(
-            lambda request_id, msg, ctx=context:
-            self._on_pair_failed(request_id, msg, ctx))
+        worker._selection_context = context
+        worker.finished_ok.connect(self._on_pair_done)
+        worker.failed.connect(self._on_pair_failed)
         self._pair_worker = worker
         self._pair_request_id = worker.request_id
         worker.start()
 
-    def _on_pair_done(self, request_id: int, result: dict,
-                      context: _SelectionContext | None = None):
+    @Slot(int, object)
+    def _on_pair_done(self, request_id: int, result: dict):
+        if self._closing or self._workers_shutdown:
+            return
+        worker = self._pair_worker
+        context = getattr(worker, '_selection_context', None)
         if self._pair_request_id != request_id:
             return   # stale result — ignore
         if context is not None and not self._context_is_current(context):
@@ -393,7 +432,7 @@ class CompareWorkbench(QDialog):
         self.waveform.mark_onset_peak(env_b, COLOR_IR_B, 'B')
         self.summary.show_fingerprints(
             self._last_fp_a, self._last_fp_b,
-            _short(self.rec_a.path), _short(self.rec_b.path))
+            'A', 'B')
         self.phase_blend.show_pair(result.get('phase_a'),
                                    result.get('phase_b'), pair)
         self.phase_blend.show_blend(pair, blend)
@@ -406,8 +445,12 @@ class CompareWorkbench(QDialog):
             self.phase_blend.set_export_enabled(True)
         self._on_tab_changed(self.tabs.currentIndex())
 
-    def _on_pair_failed(self, request_id: int, msg: str,
-                        context: _SelectionContext | None = None):
+    @Slot(int, str)
+    def _on_pair_failed(self, request_id: int, msg: str):
+        if self._closing or self._workers_shutdown:
+            return
+        worker = self._pair_worker
+        context = getattr(worker, '_selection_context', None)
         if self._pair_request_id != request_id:
             return
         if context is not None and not self._context_is_current(context):
@@ -418,7 +461,23 @@ class CompareWorkbench(QDialog):
         self.status.setText(f'Pair analysis failed: {msg}')
 
     # ---- tab-driven heavy views ---------------------------------------------------
+    def _wrap_scroll(self, widget) -> QScrollArea:
+        """Wrap a dense panel so its content can scroll vertically when the
+        dialog is shorter than the panel's minimum at 125-175% DPI."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(widget)
+        # Let the panel keep its natural minimum; the scroll area grows from
+        # the content and only adds a bar when the viewport is too small.
+        scroll.setMinimumHeight(0)
+        return scroll
+
     def _on_tab_changed(self, idx: int):
+        if self._closing or self._workers_shutdown:
+            return
         if self.rec_a is None or self.rec_b is None:
             return
         title = self.tabs.tabText(idx)
@@ -430,7 +489,9 @@ class CompareWorkbench(QDialog):
             self._ensure_spec('spec_b', self.rec_b, spectrogram=True)
 
     def _ensure_spec(self, cache_key: str, rec: AnalysisResult,
-                     spectrogram: bool = False):
+                      spectrogram: bool = False):
+        if self._closing or self._workers_shutdown:
+            return
         context = self._selection_context
         if (not self._context_is_current(context) or
                 not self._record_matches_context(rec, cache_key, context)):
@@ -457,17 +518,16 @@ class CompareWorkbench(QDialog):
 
         worker = AnalysisWorker(job)
         worker._selection_context = context
-        worker.finished_ok.connect(
-            lambda rid, res, key=cache_key, ctx=context:
-            self._on_spec_done(key, rid, res, ctx))
-        worker.failed.connect(
-            lambda rid, msg, key=cache_key, ctx=context:
-            self._on_spec_failed(key, rid, msg, ctx))
+        worker._spec_cache_key = cache_key
+        worker.finished_ok.connect(self._on_spec_done)
+        worker.failed.connect(self._on_spec_failed)
         self._spec_workers[worker_key] = worker
         worker.start()
 
     def _spec_callback_is_current(self, cache_key: str, request_id: int,
-                                  context: _SelectionContext | None) -> bool:
+                                   context: _SelectionContext | None) -> bool:
+        if self._closing or self._workers_shutdown:
+            return False
         worker = self._spec_workers.get(cache_key)
         if worker is None or getattr(worker, 'request_id', None) != request_id:
             return False
@@ -481,6 +541,7 @@ class CompareWorkbench(QDialog):
                 return False
         return self._selection_context is not None
 
+    @Slot(int, object)
     def _on_spec_done(self, *args):
         if len(args) == 2:
             request_id, result = args
@@ -507,6 +568,7 @@ class CompareWorkbench(QDialog):
         self._spec_cache[cache_key] = result
         self._apply_spec(cache_key, result)
 
+    @Slot(int, str)
     def _on_spec_failed(self, *args):
         if len(args) == 2:
             request_id, msg = args
@@ -577,6 +639,11 @@ class CompareWorkbench(QDialog):
     def _export_pair(self):
         """Shared precondition + directory picker; None means do not export."""
         from PySide6.QtWidgets import QFileDialog
+        if self._closing or self._workers_shutdown:
+            return None
+        if self._export_worker is not None and self._export_worker.isRunning():
+            self.status.setText('Export already in progress.')
+            return None
         if self.rec_a is None or self.rec_b is None:
             self.status.setText('Assign both A and B first.')
             return None
@@ -587,6 +654,51 @@ class CompareWorkbench(QDialog):
         dest = QFileDialog.getExistingDirectory(self, 'Export processed IRs to…')
         return dest or None
 
+    def _start_export(self, label: str, job) -> None:
+        """Run a captured export job off the GUI thread.
+
+        The handler has already verified the current pair before opening the
+        directory picker.  ``job`` closes over that verified snapshot, so an
+        A/B change while I/O is running cannot redirect the export to a new
+        selection.
+        """
+        worker = AnalysisWorker(job)
+        worker._export_label = label
+        worker.finished_ok.connect(self._on_export_done)
+        worker.failed.connect(self._on_export_failed)
+        worker.finished.connect(self._on_export_finished)
+        self._export_worker = worker  # QThread is not QObject-owned by the UI
+        self.status.setText(f'Exporting {label}…')
+        worker.start()
+
+    @Slot(int, object)
+    def _on_export_done(self, request_id: int, message: str):
+        worker = self._export_worker
+        if worker is None or worker.request_id != request_id:
+            return
+        self._export_worker = None
+        if not self._closing and not self._workers_shutdown:
+            # This message describes the captured export, not the live A/B
+            # selection, so it remains truthful if the user changed selection.
+            self.status.setText(message)
+
+    @Slot(int, str)
+    def _on_export_failed(self, request_id: int, message: str):
+        worker = self._export_worker
+        if worker is None or worker.request_id != request_id:
+            return
+        label = getattr(worker, '_export_label', 'Export')
+        self._export_worker = None
+        if not self._closing and not self._workers_shutdown:
+            self.status.setText(f'{label} export failed: {message}')
+
+    @Slot()
+    def _on_export_finished(self):
+        """Release a cancelled worker which emits neither result signal."""
+        worker = self._export_worker
+        if worker is not None and not worker.isRunning():
+            self._export_worker = None
+
     def _export_aligned_b(self):
         dest = self._export_pair()
         if not dest:
@@ -594,19 +706,22 @@ class CompareWorkbench(QDialog):
         from app.extensions.contracts import IRProcessingConfig
         from app.extensions.processing_export import export_pair_aligned_b
         pair = self._last_pair
+        rec_a, rec_b = self.rec_a, self.rec_b
         cfg = IRProcessingConfig(normalize_peak_dbfs=-1.0,
                                  note='suggested alignment from Compare A/B')
-        try:
-            prep_a = self.service.prepared(self.rec_a)
-            prep_b = self.service.prepared(self.rec_b)
+        def job(worker):
+            if worker.cancelled:
+                return None
+            prep_a = self.service.prepared(rec_a)
+            prep_b = self.service.prepared(rec_b)
+            if worker.cancelled:
+                return None
             report = export_pair_aligned_b(prep_a, prep_b, pair, dest, cfg=cfg,
-                                           suffix='aligned')
-        except Exception as exc:   # B05: surface I/O/analysis failures in UI
-            self.status.setText(f'Aligned-B export failed: {exc}')
-            return
-        self.status.setText(f"Exported {report.output_path.rsplit(chr(92), 1)[-1]} "
-                            f"(delay {pair.delay_samples:+.2f} samples, polarity "
-                            f"{pair.polarity:+d})")
+                                            suffix='aligned')
+            return (f"Exported {report.output_path.rsplit(chr(92), 1)[-1]} "
+                    f"(delay {pair.delay_samples:+.2f} samples, polarity "
+                    f"{pair.polarity:+d})")
+        self._start_export('Aligned-B', job)
 
     def _export_blend(self):
         dest = self._export_pair()
@@ -615,15 +730,17 @@ class CompareWorkbench(QDialog):
         from app.extensions.processing_export import export_blend
         pair = self._last_pair
         ratio = self.phase_blend.current_ratio_b()
-        try:
-            prep_a = self.service.prepared(self.rec_a)
-            prep_b = self.service.prepared(self.rec_b)
+        rec_a, rec_b = self.rec_a, self.rec_b
+        def job(worker):
+            if worker.cancelled:
+                return None
+            prep_a = self.service.prepared(rec_a)
+            prep_b = self.service.prepared(rec_b)
+            if worker.cancelled:
+                return None
             report = export_blend(prep_a, prep_b, pair, ratio, dest)
-        except Exception as exc:   # B05: surface I/O/analysis failures in UI
-            self.status.setText(f'Blend export failed: {exc}')
-            return
-        self.status.setText(f"Exported blend → "
-                            f"{report.output_path.rsplit(chr(92), 1)[-1]}")
+            return f"Exported blend → {report.output_path.rsplit(chr(92), 1)[-1]}"
+        self._start_export('Blend', job)
 
     def _export_report(self):
         dest = self._export_pair()
@@ -632,19 +749,20 @@ class CompareWorkbench(QDialog):
         from app.extensions.processing_export import export_pair_report
         pair = self._last_pair
         blend = self._last_blend
-        try:
+        fp_a, fp_b = self._last_fp_a, self._last_fp_b
+        name = f"pair_report_{_short(self.rec_a.path)}_vs_{_short(self.rec_b.path)}.json"
+        def job(worker):
+            if worker.cancelled:
+                return None
             report = export_pair_report(
-                pair, blend,
-                self._last_fp_a, self._last_fp_b,
-                dest, name=f"pair_report_{_short(self.rec_a.path)}_vs_"
-                           f"{_short(self.rec_b.path)}.json")
-        except Exception as exc:   # B05: surface I/O failures in UI
-            self.status.setText(f'Report export failed: {exc}')
-            return
-        self.status.setText(f"Exported report → {report.output_path}")
+                pair, blend, fp_a, fp_b, dest, name=name)
+            return f"Exported report → {report.output_path}"
+        self._start_export('Report', job)
 
     # ---- response search ------------------------------------------------------------
     def _run_response_search(self, request: dict):
+        if self._closing or self._workers_shutdown:
+            return
         records = getattr(self.parent(), 'library_records', lambda: [])()
         if not records:
             self.status.setText('No library loaded.')
@@ -667,17 +785,33 @@ class CompareWorkbench(QDialog):
                 cancel=lambda: worker.cancelled)
 
         self.status.setText('Response search: fingerprinting shortlist…')
+        if self._search_worker is not None:
+            self._retire_worker(self._search_worker)
         worker = AnalysisWorker(job)
+        worker._selection_generation = self._selection_generation
         worker.finished_ok.connect(self._on_search_done)
-        worker.failed.connect(lambda rid, m: self.status.setText(
-            f'Response search failed: {m}'))
+        worker.failed.connect(self._on_search_failed)
         self._search_worker = worker
         worker.start()
 
+    @Slot(int, object)
     def _on_search_done(self, request_id: int, ranked):
         worker = getattr(self, '_search_worker', None)
-        if not worker or worker.request_id != request_id:
+        if (self._closing or self._workers_shutdown or not worker or
+                worker.request_id != request_id or
+                getattr(worker, '_selection_generation', None) !=
+                self._selection_generation):
             return
         self.search.show_results(ranked)
         self.status.setText(f'Response search: {len(ranked)} candidates ranked '
                             f'({sum(1 for c in ranked if not c.excluded)} eligible)')
+
+    @Slot(int, str)
+    def _on_search_failed(self, request_id: int, message: str):
+        worker = getattr(self, '_search_worker', None)
+        if (self._closing or self._workers_shutdown or not worker or
+                worker.request_id != request_id or
+                getattr(worker, '_selection_generation', None) !=
+                self._selection_generation):
+            return
+        self.status.setText(f'Response search failed: {message}')

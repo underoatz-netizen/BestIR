@@ -178,8 +178,8 @@ def test_summary_panel_table_and_cards_display(qapp):
         card_txt = panel._cards['gd_valid_coverage'].val_a_lbl.text()
         assert card_txt == '25.10%'
 
-        # differences prose uses display-unit numbers (percent rows)
-        assert 'Valid phase coverage' in panel.why.toPlainText()
+        # differences prose: when inputs are identical, cleanly indicates similarity
+        assert 'ใกล้เคียงกัน' in panel.why.toPlainText() or 'No measurable' in panel.why.toPlainText()
     finally:
         panel.close()
 

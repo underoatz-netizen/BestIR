@@ -194,3 +194,35 @@ Suggested usable flow: **EQ shortlist เดิม → เลือก A/B → S
 - **ยังไม่ทดสอบ (NOT RUN)**: native Windows desktop interaction และ DPI 125-200%, audio-device playback/re-amping, packaged EXE smoke รอบนี้, และ OpenGL 3D บน GPU จริง ห้ามอ้างว่าขอบเขตเหล่านี้ผ่าน; release gate ข้อ 6 (native desktop/high-DPI, GL, EXE reopen) จึงยังไม่ครบและ QA ยังไม่ sign-off
 - **เลื่อน (deferred)**: U02 (search 33 px / filter row) เลื่อนไป Wave 7 พร้อมงาน native DPI/interaction gate; U01-U09 จึงยังไม่ถือว่าปิดครบทั้งชุด
 - **diagnostic probe**: `docs/review_tools/final_review_probe.py` เพิ่มการตรวจ B06 ว่า stale result ของ request เก่า (ID 42) ถูก reject และไม่กลายเป็น pair ที่ active/exportable (`stale_pair_rejected`) การเปลี่ยนนี้เป็นเครื่องมือวินิจฉัยเท่านั้น ไม่กระทบ production code
+
+## Wave 7 QA addendum (2026-09-02)
+
+- **U02 ปิดใน source/test scope**: Extended window แยก Search และ Clear เป็นแถวแรก, กำหนด minimum width ของ Search ที่ 160 px และ minimum height ของ Search/Clear ที่ 33 px เฉพาะ instance, และวาง SR/Ch/Tags/Flat ในแถวรองที่พับได้; เมื่อจอแคบ overflow popup ย้าย label ไปพร้อม control และไม่แก้ `app/ui` หรือ filter signals/logic
+- **หลักฐาน**: `python -m pytest tests/extensions/test_wave5_responsive.py -q` ผ่าน **11 tests**; `python -m pytest tests/extensions -q -p no:cacheprovider` ผ่าน **195 tests**; `python -m pytest tests -q` ผ่าน **215 tests**
+- **native QA ยัง NOT RUN**: selftest ของ legacy และ extended ผ่าน แต่ไม่ใช่หลักฐาน native Windows interaction/DPI; DPI 125-200%, keyboard interaction, audio-device playback/re-amping, packaged EXE smoke และ OpenGL GPU ยังต้องรันทดสอบจริงก่อน sign-off
+
+## Wave 8 QA addendum (2026-09-03)
+
+- **Automation gates**: ปิด B01-B18 และ U01-U02 ใน source/test scope แล้ว; baseline ก่อน async export มี **236 tests** ผ่านสองรอบต่อเนื่อง (32.93 s, 33.08 s) และหลังเพิ่ม regression สำหรับ export worker ชุดเต็มผ่าน **237 tests** (33.12 s). `python -m app.main --selftest` และ `python -m app.extended_main --selftest` ผ่านทั้งคู่
+- **WP-08 export hardening**: ใช้ atomic output reservation (`O_CREAT | O_EXCL`), cleanup ไฟล์ชั่วคราว, peak headroom/clipping guard และ pair validation; export aligned-B, blend และ report ทำงานบน worker thread แบบ single-flight จึงไม่ block GUI ระหว่าง preparation หรือ I/O
+- **Diagnostic probe**: แก้การเปรียบเทียบ raw/onset blend ให้ interpolate ลง common physical frequency grid แล้ว จึงไม่เกิด shape mismatch เมื่อ alignment ทำให้ `nfft` ต่างกัน
+- **ขอบเขต release ที่ยังคง NOT RUN**: Native Windows High-DPI 125-200% และ keyboard navigation, audio playback/re-amping บนอุปกรณ์จริง, OpenGL 3D CSD บน GPU จริง, และ build/smoke `BestIR.exe` / `BestIRExtended.exe` ต้องทำบนเครื่องจริงก่อน final sign-off
+
+## Wave 9 native QA addendum (2026-09-03)
+
+- **ผ่านบนเครื่องจริง**: keyboard navigation (Tab, Shift+Tab, Enter, Space) ของ library filters, A/B selector, export และ search; audio playback และ re-amping กับ sound device จริง; `BestIRExtended.exe` smoke ผ่าน
+- **DPI blocker**: 125% และ 150% ผ่าน แต่ที่ 175% บางปุ่มหาย/ไม่แสดง; 200% ยังไม่สามารถทดสอบจากจอปัจจุบันได้. Compare A/B Workbench ล้นตั้งแต่ 125-175% เพราะไม่มี full-screen/maximize path. Responsive native gate จึง **FAIL / ไม่ sign-off** จนกว่าจะแก้และทดสอบ 175% กับ 200% ใหม่
+- **DPI fix (Wave 10, 2026-09-03)**: Compare A/B Workbench แก้ให้ wrap header deck ใน horizontal scroll area และ wrap แท็บ Phase & Blend ใน vertical scroll area เพื่อไม่ให้ปุ่ม export หลุดล้นนอกจอที่ DPI 125-175%. แก้เฉพาะ `app/extensions/ui/compare_workbench.py` โดยไม่แตะ legacy. หลังเพิ่ม regression popup ชุดเต็มผ่าน **238 tests** (36.79 s).
+- **Native retest**: Compare A/B แสดงครบด้วย scrollbars ที่ DPI 120%, 150% และ 175%. หน้าหลัก 120% ยังครบ; ที่ 150% Library ทับส่วนกลางและ Audition ถูกบีบความสูง; ที่ 175% โซนขวาหายและไม่มี scrollbars. ปัญหาหน้าหลักอยู่นอกขอบเขต Compare-only และยังเป็น release blocker หากจะรองรับ DPI มากกว่า 120%.
+- **P1 popup fix**: `ResponseSearchPanel.simple_group` ไม่เคยถูก add เข้า control-card layout จึงเป็น top-level window "Desired Response" ทุกครั้งที่เปิด Compare A/B. เพิ่มเป็น child ใน layout และ regression test ยืนยันว่าไม่เป็น window แยก.
+- **OpenGL gate**: build log ระบุ `ModuleNotFoundError: No module named 'OpenGL'` ระหว่างเก็บ `pyqtgraph.opengl`; build นี้จึงตรวจได้เฉพาะ fallback 2D ที่ปลอดภัย ไม่สามารถยืนยัน OpenGL 3D บน GPU ได้
+- **Release decision**: release นี้ส่ง CSD แบบ deterministic **2D Fallback** เท่านั้น; OpenGL 3D เป็น deferred feature และไม่ใช่ release gate ของ build นี้. ห้ามระบุหรือแสดงว่า executable นี้รองรับ OpenGL 3D จนกว่าจะเพิ่ม dependency, package และทดสอบบน GPU จริงใน release ถัดไป
+- **Packaging**: `python -m PyInstaller BestIR.spec --noconfirm` และ `python -m PyInstaller BestIRExtended.spec --noconfirm` สร้างสำเร็จ; packaged selftest ของ `BestIR.exe` และ `BestIRExtended.exe` ผ่าน. ยังต้อง interactive smoke ของ `BestIR.exe` และทดสอบ output export/reopen จาก packaged executable ก่อน sign-off เต็มรูปแบบ
+
+## Wave 11 release & branding addendum (2026-09-04)
+
+- **Application Icon**: ออกแบบและสร้าง multi-resolution application icon (`bestir.ico` 16x16 ถึง 256x256 และ `bestir_icon.png` 512x512) ฝังลงใน `dist\BestIRExtended.exe` และตั้งเป็นหน้าต่าง/ทาสก์บาร์ไอคอนเรียบร้อยแล้ว
+- **Library Folder Management**: เพิ่มปุ่ม `Remove Folder` สำหรับนำโฟลเดอร์ที่ไม่ต้องการออกจาก Library โดยทันที พร้อมซิงก์อัปเดตแคชรายการ IR
+- **Musician Summary Refinement**: สรุป Acoustic Differences ปรับให้อ่านง่ายเป็นภาษานักดนตรี กระชับระบุทิศทาง A/B ชัดเจน พร้อมไอคอนช่วยอ่าน (⚡, ⌛, ▣, ↔)
+- **Quality Gates**: Automated test suite ผ่านครบ **239/239 tests**; packaged selftest ผ่านสมบูรณ์ (`BestIR selftest OK`)
+- **Artifact**: `dist\BestIRExtended.exe` ขนาด ~98.6 MB (มีไอคอนแอปพลิเคชันฝังเรียบร้อย)

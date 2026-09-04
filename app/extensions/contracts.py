@@ -343,6 +343,27 @@ class DecayConfig:
 
 
 @dataclass(frozen=True)
+class FingerprintCacheConfig:
+    """Effective inputs to the persisted response-fingerprint calculation.
+
+    This is deliberately separate from the individual DSP configs: a cache key
+    must represent every configuration consumed by ``compute_fingerprint``.
+    ``decay_cfg`` is included now so enabling its currently future-facing
+    metrics cannot silently reuse an older cached fingerprint.
+    """
+    policy: str
+    version: str
+    prep_cfg: PreprocessingConfig
+    env_cfg: EnvelopeConfig
+    tf_cfg: TimeFrequencyConfig
+    phase_cfg: PhaseConfig
+    decay_cfg: DecayConfig
+
+    def config_hash(self) -> str:
+        return config_hash(self)
+
+
+@dataclass(frozen=True)
 class DecayResult:
     key: SourceKey
     cfg: DecayConfig

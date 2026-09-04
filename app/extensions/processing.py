@@ -52,14 +52,23 @@ def apply_alignment(prepared: PreparedIR, cfg: IRProcessingConfig
         x = -x
     if abs(cfg.delay_samples) >= 1e-9:
         x = fractional_shift(x, cfg.delay_samples)
-    if cfg.normalize_peak_dbfs is not None:
-        peak = float(np.max(np.abs(x)))
-        if peak > 0:
-            target = 10 ** (cfg.normalize_peak_dbfs / 20.0)
-            x = x * (target / peak)
-        else:
-            warnings.append('silent IR: normalization skipped')
+    x = _normalize_peak(x, cfg.normalize_peak_dbfs, warnings)
     return x, warnings
+
+
+def _normalize_peak(x: np.ndarray, target_dbfs: float | None,
+                    warnings: list[str]) -> np.ndarray:
+    """Apply the one explicit export normalization convention, if requested."""
+    if target_dbfs is None:
+        return x
+    target_dbfs = float(target_dbfs)
+    if not np.isfinite(target_dbfs) or target_dbfs > 0.0:
+        raise ValueError('normalize_peak_dbfs must be finite and at or below 0 dBFS')
+    peak = float(np.max(np.abs(x)))
+    if peak > 0:
+        return x * (10 ** (target_dbfs / 20.0) / peak)
+    warnings.append('silent IR: normalization skipped')
+    return x
 
 
 def blend_gains(ratio_b: float) -> tuple[float, float]:
@@ -88,5 +97,5 @@ def blend_sum(a: PreparedIR, b: PreparedIR,
     gA, gB = blend_gains(ratio_b)
     mix = gA * A + gB * s * B
     warnings = list(prepared.warnings)
-    _ = cfg
+    mix = _normalize_peak(mix, cfg.normalize_peak_dbfs if cfg else None, warnings)
     return mix, sr, warnings

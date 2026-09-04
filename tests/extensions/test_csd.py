@@ -1,6 +1,7 @@
 """WP-03 gates: CSD waterfall and spectrogram with persistence metrics."""
 import dataclasses
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,92 @@ def _prep(x, sr=fx.SR):
 
 
 from app.extensions.preprocessing import prepare  # noqa: E402
+
+
+def _gl_result(mag=None):
+    """Small independent CSD-shaped input for optional-renderer unit tests."""
+    mag = np.asarray([[-20., -12., -8.], [-18., -10., -6.],
+                      [-16., -9., -5.]] if mag is None else mag)
+    return types.SimpleNamespace(
+        magnitude_db=mag, freqs=np.array([100., 500., 1000.]),
+        times_ms=np.array([0., 10., 20.]),
+        cfg=types.SimpleNamespace(dynamic_range_db=60.0), metrics={},
+        band_decay={})
+
+
+def test_opengl_mesh_geometry_and_face_colour_shapes():
+    """GL mesh inputs are separate, finite arrays without requiring OpenGL."""
+    from app.extensions.ui.renderers.csd_opengl import _mesh_data
+
+    vertexes, faces, face_colors, _bounds = _mesh_data(_gl_result())
+    assert vertexes.shape == (9, 3)
+    assert faces.shape == (8, 3)
+    assert face_colors.shape == (8, 4)  # one RGBA colour per triangular face
+    assert np.isfinite(vertexes).all() and np.isfinite(face_colors).all()
+    assert faces.dtype == np.uint32 and faces.max() < len(vertexes)
+
+
+def test_opengl_mesh_rejects_empty_nonfinite_and_degenerate_inputs():
+    from app.extensions.ui.renderers.csd_opengl import _mesh_data
+
+    assert _mesh_data(_gl_result(np.empty((0, 0)))) is None
+    assert _mesh_data(_gl_result(np.ones((1, 3)))) is None
+    bad_axes = _gl_result()
+    bad_axes.freqs[0] = 0
+    assert _mesh_data(bad_axes) is None
+    all_nan = _gl_result(np.full((3, 3), np.nan))
+    assert _mesh_data(all_nan) is None
+
+
+def test_opengl_renderer_passes_valid_glmeshitem_kwargs_without_gpu():
+    from app.extensions.ui.renderers.csd_opengl import OpenGLCsdRenderer
+
+    calls = {}
+    class FakeMesh:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+    renderer = OpenGLCsdRenderer.__new__(OpenGLCsdRenderer)
+    renderer._gl = types.SimpleNamespace(GLMeshItem=FakeMesh)
+    view = types.SimpleNamespace(items=[], clear=lambda: view.items.clear(),
+                                 addItem=lambda item: view.items.append(item),
+                                 setCameraPosition=lambda **kwargs: calls.update(camera=kwargs))
+    assert renderer.render(view, _gl_result()) is True
+    assert {'vertexes', 'faces', 'faceColors'} <= calls.keys()
+    assert 'facecolors' not in calls
+    assert calls['vertexes'].shape[1] == 3
+    assert calls['faces'].shape[1] == 3
+    assert calls['faceColors'].shape == (len(calls['faces']), 4)
+
+
+def test_csd_view_switches_failed_gl_renderer_to_2d_fallback(monkeypatch):
+    """A GL render failure replaces its canvas; no PlotWidget call hits GL."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    pytest.importorskip('PySide6')
+    from PySide6.QtWidgets import QApplication, QWidget
+    QApplication.instance() or QApplication([])
+    import app.extensions.ui.csd_view as view_mod
+
+    class FakeGlRenderer:
+        def create_view(self):
+            class FakeGlView(QWidget):
+                def clear(self):
+                    pass
+            return FakeGlView()
+
+        def render(self, _view, _result, _mode):
+            raise RuntimeError('no native context')
+
+    monkeypatch.setattr(view_mod, 'try_opengl_renderer', lambda: FakeGlRenderer())
+    view = view_mod.CsdView()
+    try:
+        assert view.using_opengl
+        view.show_csd(_gl_result(), 'A')
+        assert not view.using_opengl
+        assert view._renderer.name == '2d'
+        assert '2D Fallback' in view._renderer_badge.text()
+    finally:
+        view.close()
 
 
 def test_slow_80hz_ranks_longer_than_fast_fixture():

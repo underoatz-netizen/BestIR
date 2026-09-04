@@ -77,6 +77,22 @@ def normalized_effect(feature: str, delta: float, val_a: float | None,
     return abs(delta) / max(scale, 1e-9)
 
 
+def _musician_difference(feature: str, label: str, delta: float) -> str | None:
+    """Describe a validated A/B difference without turning a metric into a winner."""
+    higher, lower = ('A', 'B') if delta > 0 else ('B', 'A')
+    if feature in ('time_to_peak_ms', 'rise_time_ms'):
+        return f'⚡ {label}: {lower} มีแนวโน้มหัวโน้ตมาไวกว่า {higher}'
+    if feature in ('early_energy_5ms', 'early_late_ratio', 'crest_factor'):
+        return f'⚡ {label}: {higher} มีพลังงานช่วงต้นเด่นกว่า {lower}'
+    if feature == 'd20_low_ms':
+        return f'⌛ {label}: {higher} ย่านต่ำเก็บตัวนานกว่า {lower}'
+    if feature == 'boxiness_persistence_excess_db':
+        return f'▣ {label}: {higher} มีกลางต่ำค้างเด่นกว่า {lower}'
+    if feature in ('gd_median_ms', 'gd_spread_ms'):
+        return f'↔ {label}: เวลาตอบสนองบางย่านของ {higher} และ {lower} ต่างกัน'
+    return f'• {label}: {higher} วัดค่าได้สูงกว่า {lower}'
+
+
 class SummaryPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -201,7 +217,7 @@ class SummaryPanel(QWidget):
                 delta_text = format_cell(d, unit, signed=True, sig=3)
                 # U08: dimensionless effect, never raw cross-unit magnitudes
                 diffs.append((normalized_effect(feat, d, da, db),
-                              label, d, da, db, unit))
+                              feat, label, d, da, db, unit))
             rows.append((label, ta, tb, delta_text, na, nb))
         self.table.setRowCount(len(rows))
         for i, (label, ta, tb, td, na, nb) in enumerate(rows):
@@ -215,22 +231,27 @@ class SummaryPanel(QWidget):
             if nb:
                 self.table.item(i, 2).setToolTip(f'B: {nb}')
 
-        # Format Difference Explanation (neutral, dimensionless ranking)
+        # Compact, musician-oriented summary.  The table above remains the
+        # technical evidence; these lines deliberately use A/B, not filenames.
         diffs.sort(reverse=True)
         lines = []
-        for _effect, label, d, da, db, unit in diffs[:6]:
-            u_str = unit_suffix(unit)
-            higher = name_a if d > 0 else name_b
-            # U08: describe the measurement only — no "winner"/"better"
-            lines.append(
-                f'• {label}: {higher} is higher by '
-                f'{format_number(abs(d), unit, sig=3)}{u_str} '
-                f'({name_a}: {format_number(da, unit)} vs '
-                f'{name_b}: {format_number(db, unit)})')
+        for effect, feat, label, d, _da, _db, _unit in diffs:
+            # Ignore deltas below the feature's own reporting scale.  A/B need
+            # not be described as different merely because they are different files.
+            if effect < 0.15:
+                continue
+            phrase = _musician_difference(feat, label, d)
+            if phrase and phrase not in lines:
+                lines.append(phrase)
+            if len(lines) == 3:
+                break
         body = '\n'.join(lines)
         if body:
             self.why.setPlainText(
-                'Ranked by normalized effect; a higher value is a '
-                'measurement, not a tone-quality judgement.\n\n' + body)
+                'จุดต่างที่ควรลองฟัง (A/B)\n\n' + body +
+                '\n\nลองสลับ A/B ด้วย DI เดียวกันและ level match; '
+                'ดูตารางด้านซ้ายสำหรับค่าที่วัด')
         else:
-            self.why.setPlainText('No measurable acoustic differences.')
+            self.why.setPlainText(
+                'A และ B ใกล้เคียงกันจากค่าที่วัด; ลองสลับฟังด้วย DI เดียวกัน '
+                'และ level match เพื่อเลือก character ที่ชอบ')

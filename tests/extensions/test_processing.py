@@ -1,6 +1,8 @@
 """WP-08 gates: non-destructive processing, collision-safe export, provenance."""
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 import numpy as np
@@ -16,8 +18,9 @@ from app.extensions.pair_compare import _estimate_delay, compare_pair, predict_b
 from app.extensions.preprocessing import prepare
 from app.extensions.processing import apply_alignment, blend_sum, fractional_shift
 from app.extensions.processing_export import (export_blend, export_pair_aligned_b,
-                                              export_pair_report,
-                                              export_processed)
+                                               export_pair_report,
+                                               export_processed)
+import app.extensions.processing_export as processing_export
 from tests.extensions import fixtures as fx
 
 
@@ -178,7 +181,8 @@ def test_apply_alignment_applies_delay_and_polarity():
     out, warnings = apply_alignment(_prep(x), cfg)
     # output = polarity-flipped then advanced by 7 samples
     expected = fractional_shift(-x, 7.0)
-    corr = np.corrcoef(out[500:8000, 0], expected[500:8000])[0, 1]
+    stop = min(8000, len(out), len(expected))
+    corr = np.corrcoef(out[500:stop, 0], expected[500:stop])[0, 1]
     assert corr > 0.999
     assert isinstance(warnings, list)
 
@@ -246,6 +250,75 @@ def test_export_is_collision_safe_and_atomic(tmp_path):
     assert p1 != p2 and p1.exists() and p2.exists()
     leftovers = list(tmp_path.glob('*.tmp'))
     assert not leftovers, leftovers
+
+
+def test_export_reserves_unique_names_for_simultaneous_exports(tmp_path):
+    prepared = _prep(fx.boxy_fixture(300.0, 0.02, n=24000))
+    cfg = IRProcessingConfig()
+
+    def write_one(_):
+        return export_processed(prepared, cfg, str(tmp_path)).output_path
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outputs = list(pool.map(write_one, range(16)))
+
+    paths = [Path(output) for output in outputs]
+    assert len(set(paths)) == len(paths)
+    assert all(path.exists() and path.stat().st_size > 44 for path in paths)
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+@pytest.mark.parametrize('failure', ('write', 'replace'))
+def test_export_cleans_reservation_and_unique_temp_after_write_failure(
+        tmp_path, monkeypatch, failure):
+    prepared = _prep(fx.boxy_fixture(300.0, 0.02, n=24000))
+
+    def fail_operation(*args, **kwargs):
+        raise OSError(f'simulated {failure} failure')
+
+    if failure == 'write':
+        monkeypatch.setattr(processing_export.sf, 'write', fail_operation)
+    else:
+        monkeypatch.setattr(processing_export.os, 'replace', fail_operation)
+    with pytest.raises(OSError, match=f'simulated {failure} failure'):
+        export_processed(prepared, IRProcessingConfig(), str(tmp_path))
+
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('bad', [np.nan, 1.01])
+def test_atomic_wav_rejects_nonfinite_and_out_of_range_samples(tmp_path, bad):
+    reserved = processing_export.unique_dest(str(tmp_path), 'unsafe.wav')
+    data = np.array([[bad]], dtype=np.float64)
+    with pytest.raises(ValueError):
+        processing_export._atomic_write_wav(reserved, data, fx.SR, 'PCM_24')
+    assert not reserved.exists()
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_export_normalizes_headroom_without_pcm_clipping(tmp_path):
+    # This is intentionally above full scale; without explicit normalization it
+    # must fail rather than allowing libsndfile's PCM conversion to clip it.
+    prepared = _prep(2.0 * fx.boxy_fixture(300.0, 0.02, n=24000))
+    with pytest.raises(ValueError, match='exceeds 0 dBFS'):
+        export_processed(prepared, IRProcessingConfig(), str(tmp_path))
+
+    report = export_processed(prepared, IRProcessingConfig(normalize_peak_dbfs=-3.0),
+                              str(tmp_path))
+    data, sr = sf.read(report.output_path, always_2d=True)
+    assert sr == fx.SR
+    assert np.max(np.abs(data)) == pytest.approx(10 ** (-3.0 / 20.0), abs=2e-6)
+
+
+def test_blend_export_rejects_stale_pair_identity_and_invalid_ratio(tmp_path):
+    pa = _prep(fx.boxy_fixture(300.0, 0.02, n=24000))
+    pb = _prep(fx.boxy_fixture(320.0, 0.02, n=24000))
+    pair = compare_pair(pa, pb, PairComparisonConfig())
+    stale = dc_replace(pair, key_b=dc_replace(pb.key, path='other.wav'))
+    with pytest.raises(ValueError, match='keys'):
+        export_blend(pa, pb, stale, 0.5, str(tmp_path))
+    with pytest.raises(ValueError, match='ratio_b'):
+        export_blend(pa, pb, pair, float('nan'), str(tmp_path))
 
 
 def test_blend_sum_aligns_b_and_mixes(tmp_path):

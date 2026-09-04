@@ -7,8 +7,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.extensions.cache import FingerprintCache
-from app.extensions.contracts import (AudioBuffer, DecayConfig, PreprocessingConfig,
-                                      SourceKey)
+from app.extensions.contracts import (AudioBuffer, DecayConfig, EnvelopeConfig,
+                                       PreprocessingConfig, SourceKey)
 from app.extensions.decay import compute_decay
 from app.extensions.preprocessing import prepare
 from app.extensions.service import ResponseService
@@ -80,6 +80,31 @@ def test_fingerprint_deterministic_gain_invariant_and_cached(tmp_path):
     svc2 = ResponseService(cache=FingerprintCache(str(tmp_path / 'fp.db')))
     fp1_cached = svc2.fingerprint(r1)
     assert fp1_cached.to_json() == fp1.to_json()
+
+
+def test_fingerprint_cache_identity_tracks_effective_service_config(tmp_path):
+    """A changed fingerprint input config must not reuse a sidecar entry."""
+    from tests.synth import write_wav
+    path = Path(write_wav(tmp_path / 'a.wav',
+                          fx.boxy_fixture(300.0, 0.06, n=48000)))
+    record = analyze_file(str(path))
+    cache = FingerprintCache(str(tmp_path / 'fp.db'))
+    default = ResponseService(cache=cache)
+    changed = ResponseService(env_cfg=EnvelopeConfig(rms_window_ms=4.0),
+                              cache=cache)
+
+    fp_default = default.fingerprint(record)
+    fp_changed = changed.fingerprint(record)
+
+    assert fp_default.cfg_hash != fp_changed.cfg_hash
+    signature = fp_default.key.signature()
+    assert cache.get(signature, fp_default.cfg_hash) is not None
+    assert cache.get(signature, fp_changed.cfg_hash) is not None
+    assert cache.count() == 2
+
+    # A new default-config service round-trips exactly from its own cache slot.
+    roundtrip = ResponseService(cache=FingerprintCache(str(tmp_path / 'fp.db')))
+    assert roundtrip.fingerprint(record).to_json() == fp_default.to_json()
 
 
 def test_fingerprint_features_bounded_and_valid(tmp_path):

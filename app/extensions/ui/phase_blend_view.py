@@ -177,7 +177,7 @@ class PhaseBlendView(QWidget):
 
         self.info = QTextEdit()
         self.info.setReadOnly(True)
-        self.info.setMaximumHeight(95)
+        self.info.setMaximumHeight(80)
         self.info.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {SURFACE_CARD};

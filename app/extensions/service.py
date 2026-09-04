@@ -71,14 +71,15 @@ class ResponseService:
     def fingerprint(self, record: AnalysisResult, force: bool = False
                     ) -> ResponseFingerprint:
         from .contracts import SourceKey
-        from .fingerprint import CFG_HASH, compute_fingerprint
+        from .fingerprint import compute_fingerprint, effective_cfg_hash
         signature = self._signature_for(record)
+        cfg_hash = effective_cfg_hash(self)
         if not force:
-            cached = self.cache.get(signature, CFG_HASH)
+            cached = self.cache.get(signature, cfg_hash)
             if cached is not None:
                 return cached
         fp = compute_fingerprint(record, self)
-        self.cache.put(fp, CFG_HASH)
+        self.cache.put(fp, cfg_hash)
         return fp
 
     def _signature_for(self, record: AnalysisResult) -> str:

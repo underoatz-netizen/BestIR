@@ -7,7 +7,8 @@ a = Analysis(
     ['bestir_extended.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('app/assets/bestir.ico', 'app/assets'),
+           ('app/assets/bestir_icon.png', 'app/assets')],
     hiddenimports=['sounddevice', 'soundfile', 'app.extensions',
                    'app.extensions.ui'],
     hookspath=[],
@@ -37,4 +38,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='app/assets/bestir.ico',
 )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -16,29 +17,88 @@ from .contracts import (AnalysisStatus, BlendPrediction, FeatureValue,
                         IRProcessingConfig, PairComparisonResult, PreparedIR,
                         ProcessingReport, ResponseFingerprint)
 from .pair_preparation import prepare_pair
-from .processing import apply_alignment, blend_sum, fractional_shift
+from .processing import _normalize_peak, apply_alignment, blend_sum, fractional_shift
 
 
 def unique_dest(dest_dir: str, name: str) -> Path:
+    """Atomically reserve and return a unique destination path.
+
+    The zero-byte reservation is deliberately replaced by the atomic writer.
+    Callers must either write it or remove it on failure.
+    """
     Path(dest_dir).mkdir(parents=True, exist_ok=True)
-    dest = Path(dest_dir) / name
-    if not dest.exists():
-        return dest
+    directory = Path(dest_dir)
     stem, suffix = Path(name).stem, Path(name).suffix
-    for i in range(2, 1000):
-        dest = Path(dest_dir) / f'{stem} ({i}){suffix}'
-        if not dest.exists():
-            return dest
+    for i in range(1, 1000):
+        candidate = directory / (name if i == 1 else f'{stem} ({i}){suffix}')
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        else:
+            os.close(fd)
+            return candidate
     raise RuntimeError(f'no free filename for {name}')
 
 
 def _atomic_write_wav(path: Path, data: np.ndarray, sr: int, subtype: str) -> None:
-    tmp = path.with_suffix(path.suffix + '.tmp')
-    if data.shape[1] == 1:
-        sf.write(str(tmp), data[:, 0], sr, subtype=subtype, format='WAV')
-    else:
-        sf.write(str(tmp), data, sr, subtype=subtype, format='WAV')
-    os.replace(tmp, path)
+    tmp: Path | None = None
+    try:
+        _validate_wav_payload(data, sr)
+        fd, tmp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+        os.close(fd)
+        tmp = Path(tmp_name)
+        if data.shape[1] == 1:
+            sf.write(str(tmp), data[:, 0], sr, subtype=subtype, format='WAV')
+        else:
+            sf.write(str(tmp), data, sr, subtype=subtype, format='WAV')
+        os.replace(tmp, path)
+    except Exception:
+        if tmp is not None:
+            _remove_if_exists(tmp)
+        _remove_if_exists(path)  # only the reservation created by unique_dest
+        raise
+
+
+def _remove_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _validate_wav_payload(data: np.ndarray, sr: int) -> None:
+    if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] == 0:
+        raise ValueError('export audio must be a non-empty (frames, channels) array')
+    if not np.isfinite(data).all():
+        raise ValueError('export audio contains non-finite samples')
+    if not isinstance(sr, (int, np.integer)) or sr <= 0:
+        raise ValueError('export sample rate must be a positive integer')
+    peak = float(np.max(np.abs(data)))
+    if peak > 1.0 + 1e-12:
+        raise ValueError('export audio exceeds 0 dBFS; set normalize_peak_dbfs to apply headroom')
+
+
+def _validate_processing_config(cfg: IRProcessingConfig) -> None:
+    if cfg.polarity not in (-1, 1):
+        raise ValueError('processing polarity must be +1 or -1')
+    if not np.isfinite(float(cfg.delay_samples)):
+        raise ValueError('processing delay_samples must be finite')
+    if cfg.normalize_peak_dbfs is not None:
+        target = float(cfg.normalize_peak_dbfs)
+        if not np.isfinite(target) or target > 0.0:
+            raise ValueError('normalize_peak_dbfs must be finite and at or below 0 dBFS')
+
+
+def _validate_pair(a: PreparedIR, b: PreparedIR, pair: PairComparisonResult) -> None:
+    if pair.status != AnalysisStatus.OK:
+        raise ValueError(pair.reason or 'pair analysis must be OK before export')
+    if pair.key_a.signature() != a.key.signature() or pair.key_b.signature() != b.key.signature():
+        raise ValueError('pair source keys do not match the requested export inputs')
+    if pair.polarity not in (-1, 1):
+        raise ValueError('pair polarity must be +1 or -1 before export')
+    if not np.isfinite(float(pair.delay_samples)):
+        raise ValueError('pair delay_samples must be finite before export')
 
 
 def _source_name(prepared: PreparedIR, suffix: str) -> str:
@@ -49,6 +109,7 @@ def _source_name(prepared: PreparedIR, suffix: str) -> str:
 def export_processed(prepared: PreparedIR, cfg: IRProcessingConfig,
                      dest_dir: str, suffix: str = 'aligned') -> ProcessingReport:
     """Write an aligned/polarity-corrected copy of the prepared IR."""
+    _validate_processing_config(cfg)
     data, warnings = apply_alignment(prepared, cfg)
     dest = unique_dest(dest_dir, _source_name(prepared, suffix))
     _atomic_write_wav(dest, data, prepared.sample_rate, cfg.output_subtype)
@@ -80,26 +141,23 @@ def export_pair_aligned_b(a: PreparedIR, b: PreparedIR,
     the output is zero-padded to length + |delay| so the tail is never
     truncated by either shift direction.
     """
+    _validate_pair(a, b, pair)
+    if cfg is not None:
+        _validate_processing_config(cfg)
     prepared = prepare_pair(a, b)
     if prepared.status != AnalysisStatus.OK:
         raise ValueError(prepared.reason or
                          'both IRs must analyze cleanly before aligned-B export')
     subtype = cfg.output_subtype if cfg else 'PCM_24'
     advance = float(pair.delay_samples)
-    s = pair.polarity if pair.polarity != 0 else 1
+    s = pair.polarity
     data_b = np.array(prepared.data_b, dtype=np.float64, copy=True)
     if s == -1:
         data_b = -data_b
     data_b = fractional_shift(data_b, advance,
                               output_frames=len(data_b) + int(np.ceil(abs(advance))))
     warnings = list(prepared.warnings)
-    if cfg is not None and cfg.normalize_peak_dbfs is not None:
-        peak = float(np.max(np.abs(data_b)))
-        if peak > 0:
-            target = 10 ** (cfg.normalize_peak_dbfs / 20.0)
-            data_b = data_b * (target / peak)
-        else:
-            warnings.append('silent IR: normalization skipped')
+    data_b = _normalize_peak(data_b, cfg.normalize_peak_dbfs if cfg else None, warnings)
 
     dest = unique_dest(dest_dir, _source_name(b, suffix))
     _atomic_write_wav(dest, data_b, prepared.sample_rate, subtype)
@@ -126,6 +184,11 @@ def export_blend(a: PreparedIR, b: PreparedIR, pair: PairComparisonResult,
                  ratio_b: float, dest_dir: str,
                  cfg: IRProcessingConfig | None = None) -> ProcessingReport:
     """Write the aligned A+B blend as a new IR."""
+    _validate_pair(a, b, pair)
+    if cfg is not None:
+        _validate_processing_config(cfg)
+    if not np.isfinite(float(ratio_b)) or not 0.0 <= float(ratio_b) <= 1.0:
+        raise ValueError('blend ratio_b must be finite and between 0 and 1')
     subtype = (cfg.output_subtype if cfg else 'PCM_24')
     mix, sr, warnings = blend_sum(a, b, pair, ratio_b, cfg)
     name_a = Path(a.key.path).stem
@@ -147,6 +210,8 @@ def export_blend(a: PreparedIR, b: PreparedIR, pair: PairComparisonResult,
         'sample_rate_hz': sr,
         'length_samples': int(mix.shape[0]),
     }
+    if cfg is not None and cfg.normalize_peak_dbfs is not None:
+        applied['normalize_peak_dbfs'] = cfg.normalize_peak_dbfs
     return ProcessingReport(source_key=a.key, output_path=str(dest),
                             applied=applied, warnings=tuple(warnings))
 
@@ -211,9 +276,18 @@ def export_pair_report(pair: PairComparisonResult, blend: BlendPrediction | None
         'fingerprint_b': None if fp_b is None else _fp_doc(fp_b),
         'warnings': list(pair.warnings) + list(blend.warnings if blend else []),
     }
-    tmp = dest.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(doc, indent=2), encoding='utf-8')
-    os.replace(tmp, dest)
+    tmp: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f'.{dest.name}.', suffix='.tmp', dir=dest.parent)
+        os.close(fd)
+        tmp = Path(tmp_name)
+        tmp.write_text(json.dumps(doc, indent=2), encoding='utf-8')
+        os.replace(tmp, dest)
+    except Exception:
+        if tmp is not None:
+            _remove_if_exists(tmp)
+        _remove_if_exists(dest)
+        raise
     return ProcessingReport(source_key=pair.key_a, output_path=str(dest),
                             applied={'report': 'pair provenance'},
                             warnings=tuple(pair.warnings))

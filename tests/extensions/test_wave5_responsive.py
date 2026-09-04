@@ -14,9 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pytest
 
 pytest.importorskip('PySide6')
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, Qt  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QToolButton)  # noqa: E402
 
 # Snapshot the legacy module-level styling BEFORE any window exists.
 # These must survive window creation untouched (B18).
@@ -77,6 +77,26 @@ def _settle(win, qapp, width):
     qapp.processEvents()
 
 
+def _hbox_rows(panel):
+    """Top-level horizontal sub-layouts of the library panel (public Qt)."""
+    lay = panel.layout()
+    return [lay.itemAt(i) for i in range(lay.count())
+            if isinstance(lay.itemAt(i), QHBoxLayout)]
+
+
+def _row_with(panel, widget):
+    for row in _hbox_rows(panel):
+        if row.indexOf(widget) >= 0:
+            return row
+    return None
+
+
+def _row_widget_texts(row):
+    return [item.widget().text() for item in
+            (row.itemAt(i) for i in range(row.count()))
+            if item.widget() is not None and hasattr(item.widget(), 'text')]
+
+
 # ---- U01: responsive drawer + filter wrap ----------------------------------
 def test_compact_width_collapses_inspector_and_wraps_filters(extended, qapp):
     adapter = _adapter(extended)
@@ -122,6 +142,178 @@ def test_inspector_drawer_toggle_restores_splitter_sizes(extended, qapp):
     assert adapter.inspector_open()
     assert not extended.inspector.isHidden()
     assert list(splitter.sizes()) == sizes_before
+
+
+# ---- U02 (Wave 7): wide search row + separate collapsible secondary row -----
+def test_u02_wide_search_row_and_separate_filter_row(extended, qapp):
+    adapter = _adapter(extended)
+    panel = extended.library_panel
+    _settle(extended, qapp, 1400)
+    assert not adapter.is_compact()
+    assert adapter.filter_overflow() is None
+
+    # search keeps its own row together with Clear only
+    search_row = _row_with(panel, panel.search)
+    assert search_row is not None
+    assert search_row.indexOf(panel.clear_btn) >= 0
+    for name in adapter.FILTER_WIDGETS:
+        widget = getattr(panel, name)
+        assert widget.parent() is panel, name        # instance-local, no popup
+        assert search_row.indexOf(widget) < 0, name   # not on the search row
+
+    # the secondary filters share one separate row below it
+    filter_row = _row_with(panel, panel.sr_combo)
+    assert filter_row is not None and filter_row is not search_row
+    assert filter_row.indexOf(panel.search) < 0
+    for name in ('ch_combo', 'tag_combo', 'flat_spin'):
+        assert filter_row.indexOf(getattr(panel, name)) >= 0, name
+
+    # instance-local minimum usable width for the search field (>= 160 px)
+    assert panel.search.minimumWidth() >= 160
+    assert panel.search.minimumHeight() >= 33
+    assert panel.clear_btn.minimumHeight() >= 33
+
+
+def test_u02_wide_filter_row_collapse_toggle(extended, qapp):
+    adapter = _adapter(extended)
+    panel = extended.library_panel
+    _settle(extended, qapp, 1400)
+    assert not adapter.filter_row_collapsed()
+    for name in adapter.FILTER_WIDGETS:
+        assert getattr(panel, name).isVisibleTo(panel), name
+
+    adapter.toggle_filter_row()
+    qapp.processEvents()
+    assert adapter.filter_row_collapsed()
+    for name in adapter.FILTER_WIDGETS:
+        assert not getattr(panel, name).isVisibleTo(panel), name
+    # the search row and the legacy table stay usable while collapsed
+    assert panel.search.isVisibleTo(panel)
+    assert panel.clear_btn.isVisibleTo(panel)
+
+    adapter.toggle_filter_row()
+    qapp.processEvents()
+    assert not adapter.filter_row_collapsed()
+    for name in adapter.FILTER_WIDGETS:
+        assert getattr(panel, name).isVisibleTo(panel), name
+
+
+def test_u02_wide_filter_signals_and_semantics_preserved(extended, qapp):
+    adapter = _adapter(extended)
+    panel = extended.library_panel
+    _settle(extended, qapp, 1400)
+    fired = []
+    panel.filters_changed.connect(lambda: fired.append(dict(panel.filters())))
+
+    panel.search.setText('a.wav')
+    assert fired and fired[-1]['text'] == 'a.wav'
+    panel.sr_combo.setCurrentIndex(2)               # '48000'
+    assert fired[-1]['sr'] == 48000
+    panel.ch_combo.setCurrentIndex(1)               # Mono
+    assert fired[-1]['channels'] == 1
+    panel.flat_spin.setValue(3.5)
+    assert fired[-1]['max_flatness'] == 3.5
+    panel.clear_btn.click()
+    assert fired[-1]['text'] == '' and fired[-1]['sr'] == 0
+    assert fired[-1]['channels'] == 0
+    assert fired[-1]['max_flatness'] is None
+
+    # the filter dictionary still drives the unchanged legacy predicate
+    panel.search.setText('a.wav')
+    hits = panel.apply_filters(list(extended.library))
+    assert [os.path.basename(r.path) for r in hits] == ['a.wav']
+
+
+def test_u02_compact_overflow_behavior_preserved_after_split(extended, qapp):
+    adapter = _adapter(extended)
+    panel = extended.library_panel
+    _settle(extended, qapp, 1400)
+
+    # collapse the wide filter row, then narrow down: the compact popup path
+    # must behave exactly as before (original row restored, popup created)
+    adapter.toggle_filter_row()
+    _settle(extended, qapp, 1100)
+    assert adapter.is_compact()
+    assert adapter.filter_overflow() is not None
+    assert adapter.filter_row_collapsed() is False   # no leaked collapsed state
+    for name in adapter.FILTER_WIDGETS:
+        widget = getattr(panel, name)
+        assert widget.parent() is not panel, name
+        assert widget.isVisibleTo(widget.parent()), name
+    assert panel.search.parent() is panel
+    search_row = _row_with(panel, panel.search)
+    assert search_row is not None
+    # The primary compact row contains no labels whose controls now live in
+    # the popup.  Search/Clear and the overflow affordance remain usable.
+    assert panel.clear_btn in [search_row.itemAt(i).widget()
+                               for i in range(search_row.count())]
+    texts = _row_widget_texts(search_row)
+    assert 'Search' in texts and 'Filters ▾' in texts
+    assert not {'SR', 'Ch', 'Flat ≤'}.intersection(texts)
+    # only one row containing search exists in compact mode (the original one)
+    assert len(_hbox_rows(panel)) == 2
+
+    # filters still emit from inside the popup
+    fired = []
+    panel.filters_changed.connect(lambda: fired.append(dict(panel.filters())))
+    panel.sr_combo.setCurrentIndex(1)               # '44100'
+    assert fired and fired[-1]['sr'] == 44100
+
+    _settle(extended, qapp, 1400)
+    assert not adapter.is_compact()
+    assert adapter.filter_overflow() is None
+    assert panel.sr_combo.currentIndex() == 1       # value survives the trips
+    assert panel.sr_combo.parent() is panel
+    hits = panel.apply_filters(list(extended.library))   # all IRs are 48k
+    assert hits == []
+
+
+def test_u02_compact_overflow_survives_repeated_split_transitions(extended, qapp):
+    """The retained popup action stays valid across repeated transitions."""
+    adapter = _adapter(extended)
+    panel = extended.library_panel
+    _settle(extended, qapp, 1400)
+
+    for _ in range(12):
+        adapter.toggle_filter_row()
+        _settle(extended, qapp, 1100)
+        assert adapter.is_compact()
+        assert adapter.filter_overflow() is not None
+        for name in adapter.FILTER_WIDGETS:
+            assert getattr(panel, name).parent() is not panel, name
+
+        _settle(extended, qapp, 1400)
+        # Process the transient button teardown before building the next
+        # compact view.
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        qapp.processEvents()
+        assert not adapter.is_compact()
+        assert adapter.filter_overflow() is None
+        assert panel.sr_combo.parent() is panel
+
+
+def test_u02_legacy_library_panel_layout_untouched(qapp):
+    """A plain legacy LibraryPanel (no adapter) keeps the original row."""
+    from app.extensions.ui.responsive_layout import ResponsiveLayoutAdapter
+    from app.ui.library_panel import LibraryPanel
+
+    panel = LibraryPanel()
+    try:
+        rows = _hbox_rows(panel)
+        assert len(rows) == 2                      # folders row + filter row
+        frow = _row_with(panel, panel.search)
+        assert frow is not None
+        for name in ResponsiveLayoutAdapter.FILTER_WIDGETS:
+            assert frow.indexOf(getattr(panel, name)) >= 0, name
+        assert frow.indexOf(panel.clear_btn) >= 0
+        # no instance-local minimum width, no toggle button, no second row
+        assert panel.search.minimumWidth() < ResponsiveLayoutAdapter.SEARCH_MIN_WIDTH
+        assert panel.search.minimumHeight() < ResponsiveLayoutAdapter.SEARCH_ROW_MIN_HEIGHT
+        assert panel.clear_btn.minimumHeight() < ResponsiveLayoutAdapter.SEARCH_ROW_MIN_HEIGHT
+        assert [b for b in panel.findChildren(QToolButton)
+                if b.text().startswith('Filters')] == []
+    finally:
+        panel.deleteLater()
 
 
 # ---- B18: Boro styling is instance-local, legacy globals untouched ----------
@@ -196,3 +388,26 @@ def test_ab_header_swap_button_is_accessible(qapp):
     header.swap_requested.connect(lambda: fired.append(True))
     header.swap_btn.click()
     assert fired == [True]
+
+
+# ---- Extension library folder removal --------------------------------------
+def test_remove_folder_button_updates_library_and_folders_list(extended, qapp):
+    panel = extended.library_panel
+    assert hasattr(extended, 'remove_folder_btn')
+    assert extended.remove_folder_btn.isVisibleTo(panel)
+
+    folder_list = panel.folder_list
+    folder_list.addItem('C:/test/ir_folder_1')
+    folder_list.addItem('C:/test/ir_folder_2')
+    assert folder_list.count() == 2
+
+    # Select first folder item and click remove
+    folder_list.setCurrentRow(0)
+    assert len(folder_list.selectedItems()) == 1
+    removed_path = folder_list.currentItem().text()
+
+    extended.remove_folder_btn.click()
+    # Path is gone from folder_list
+    remaining_folders = [folder_list.item(i).text() for i in range(folder_list.count())]
+    assert removed_path not in remaining_folders
+    assert len(remaining_folders) == 1

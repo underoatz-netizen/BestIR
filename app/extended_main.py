@@ -35,6 +35,13 @@ def main() -> int:
     pal.setColor(QPalette.ToolTipBase, QColor(BG_CANVAS))
     app.setPalette(pal)
 
+    # Set Window & Taskbar Icon
+    from pathlib import Path
+    from PySide6.QtGui import QIcon
+    icon_path = Path(__file__).resolve().parent / 'assets' / 'bestir.ico'
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     from app.extensions.ui.main_window_adapter import ExtendedMainWindow
     win = ExtendedMainWindow()
     win.setWindowTitle('BestIR Extended \u2014 IR screener & compare')

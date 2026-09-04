@@ -225,6 +225,10 @@ class ResponseSearchPanel(QWidget):
                 box.addLayout(lay)
             s_grid.addLayout(box)
         s_lay.addLayout(s_grid)
+        # ``simple_group`` must belong to the control card.  Leaving this
+        # frame out of the layout makes Qt treat it as a top-level window,
+        # producing a new "Desired Response" popup whenever Compare opens.
+        c_lay.addWidget(self.simple_group)
 
         # Shared tone tolerance row (label follows the mode)
         tol_row = QHBoxLayout()

@@ -11,23 +11,34 @@ import numpy as np
 from ..core.analysis import AnalysisResult
 from .channel_policy import valid_channel_aggregate
 from .contracts import (ALGO_VERSION, AnalysisStatus, FeatureValue,
-                        ResponseFingerprint)
+                        FingerprintCacheConfig, ResponseFingerprint)
 from .envelope import compute_envelope
 from .spectrogram import (DEFAULT_NEIGHBOR_BANDS, DEFAULT_PERSISTENCE_BAND,
                           compute_spectrogram)
 from .service import ResponseService
 
-# fp2: stereo channel policy (power-aggregated magnitude/envelope/CSD/
-# spectrogram + per-channel valid phase aggregation with provenance). Bumped
-# from 'fp1-guitar-default' so fingerprints cached under the OLD policy are
-# never reused: CSD/spectrogram/envelope values changed for stereo inputs and
-# phase features now aggregate ALL valid channels (not just channel 0) and
-# carry a provenance note even for mono.
-CFG_HASH = 'fp2-guitar-default'
+# fp3: stereo channel policy plus an effective, configuration-sensitive cache
+# identity.  Retained as a public policy marker for callers that need to label
+# the calculation; it is not itself a cache key.
+CFG_HASH = 'fp3-guitar-effective-config'
+
+
+def effective_cfg_hash(service: ResponseService) -> str:
+    """Return the deterministic persisted-cache identity for ``service``."""
+    return FingerprintCacheConfig(
+        policy=CFG_HASH,
+        version=ALGO_VERSION,
+        prep_cfg=service.prep_cfg,
+        env_cfg=service.env_cfg,
+        tf_cfg=service.tf_cfg,
+        phase_cfg=service.phase_cfg,
+        decay_cfg=service.decay_cfg,
+    ).config_hash()
 
 
 def compute_fingerprint(record: AnalysisResult, service: ResponseService,
                         ) -> ResponseFingerprint:
+    cfg_hash = effective_cfg_hash(service)
     prepared = service.prepared(record)
     transient: dict[str, FeatureValue] = {}
     decay: dict[str, FeatureValue] = {}
@@ -38,7 +49,7 @@ def compute_fingerprint(record: AnalysisResult, service: ResponseService,
         for group in (transient, decay, phase):
             group['unavailable'] = empty
         return ResponseFingerprint(key=prepared.key, version=ALGO_VERSION,
-                                   cfg_hash=CFG_HASH, transient=transient,
+                                   cfg_hash=cfg_hash, transient=transient,
                                    decay=decay, phase=phase)
 
     # ---- transient (envelope) ---------------------------------------------
@@ -118,7 +129,7 @@ def compute_fingerprint(record: AnalysisResult, service: ResponseService,
         phase['gd_valid_coverage'] = FeatureValue(float(ph.coverage), True)
 
     return ResponseFingerprint(key=prepared.key, version=ALGO_VERSION,
-                               cfg_hash=CFG_HASH, transient=transient,
+                               cfg_hash=cfg_hash, transient=transient,
                                decay=decay, phase=phase)
 
 

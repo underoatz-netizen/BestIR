@@ -56,3 +56,19 @@
 - Bug fix found by the extended smoke: worker DSP calls were missing the
   config argument (pair/spectrogram/CSD tabs appeared empty); the smoke now
   exercises the real worker pipeline instead of calling DSP directly
+
+## Wave 8 QA addendum (2026-09-03)
+
+- Full automated suite: baseline **236 passed** twice consecutively (32.93 s and 33.08 s); after the async-export regression test, `python -m pytest tests -q --basetemp=... -p no:cacheprovider` → **237 passed** (33.12 s).
+- Selftests: `python -m app.main --selftest` and `python -m app.extended_main --selftest` → OK.
+- Export hardening: atomic filename reservation, temporary-file cleanup, PCM clipping/headroom guard and pair validation. Aligned-B, blend and report export preparation/I/O run in a single-flight background worker so the GUI remains responsive for large files.
+- Remaining release gate is physical-environment QA only: native Windows DPI/keyboard, real audio playback/re-amping, OpenGL GPU rendering, and packaged `BestIR.exe` / `BestIRExtended.exe` build and smoke. These are not covered by offscreen automated tests and remain NOT RUN.
+
+## Native QA update (2026-09-03)
+
+- Keyboard navigation and real audio playback/re-amping passed. `BestIRExtended.exe` smoke passed.
+- DPI 125% and 150% passed. At 175%, some controls disappear; 200% was not available on the test display. Compare A/B Workbench overflows at 125-175% because it lacks a full-screen/maximize path. This is a release blocker.
+- Compare A/B was retested after its containment fix and is scrollable/complete at 120%, 150%, and 175%. The main window remains a blocker above 120%: Library overlaps the centre/Audition is vertically compressed at 150%; the right zone disappears with no scrollbars at 175%. This main-window work is outside the approved Compare-only scope.
+- Fixed a P1 lifecycle issue where the "Desired Response" frame appeared as a new top-level popup each time Compare A/B opened. It is now embedded in Response Search's control card and has a regression test.
+- Both PyInstaller builds completed, but `PyOpenGL` is not installed (`ModuleNotFoundError: No module named 'OpenGL'`), so the packaged build validates only the 2D CSD fallback. OpenGL 3D GPU validation remains blocked.
+- Release decision: ship the deterministic 2D CSD fallback only. OpenGL 3D is deferred and removed from this release's QA gate; it requires a separately packaged dependency and real-GPU validation before any future enablement.

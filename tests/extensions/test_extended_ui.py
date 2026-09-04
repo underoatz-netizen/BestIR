@@ -640,6 +640,8 @@ def test_b05_export_buttons_open_dialog_once_when_valid(extended, qapp,
                 assert dialog.call_count == idx + 1, \
                     f'{button.text()} did not trigger the dialog exactly once'
                 assert dialog.call_args_list[idx][0][0] is wb  # raised by workbench
+                assert _pump_until(qapp, lambda: len(list(out_dir.iterdir())) == idx + 1), \
+                    f'{button.text()} export did not complete'
 
         names = sorted(p.name for p in out_dir.iterdir())
         assert sum('aligned' in n for n in names) == 1, names
@@ -728,7 +730,10 @@ def test_b05_export_blocked_once_pair_becomes_stale(extended, qapp, tmp_path):
                    new=dialog):
             _click_through_event_loop(qapp, wb.phase_blend.btn_export_b)
             assert dialog.call_count == 1
-            assert any(p.name for p in out_dir.iterdir())
+            assert _pump_until(
+                qapp,
+                lambda: (wb._export_worker is None and
+                         any(p.name for p in out_dir.iterdir())))
             written = set(out_dir.iterdir())
 
             # B changes to C: invalidation is synchronous — before the new
@@ -886,8 +891,14 @@ def test_workbench_export_flow_writes_files(extended, tmp_path, qapp):
     with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory',
                return_value=str(out_dir)):
         wb._export_aligned_b()
+        assert _pump_until(qapp, lambda: any('aligned' in p.name
+                                              for p in out_dir.iterdir()))
         wb._export_blend()
+        assert _pump_until(qapp, lambda: any('pct B' in p.name
+                                              for p in out_dir.iterdir()))
         wb._export_report()
+        assert _pump_until(qapp, lambda: any(p.name.endswith('.json')
+                                              for p in out_dir.iterdir()))
     files = sorted(p.name for p in out_dir.iterdir())
     assert any('aligned' in f for f in files), files
     assert any('pct B' in f for f in files), files
@@ -928,6 +939,83 @@ class _SyncWorker:
     def start(self):
         import types
         self._job(types.SimpleNamespace(cancelled=False))
+
+
+class _FakeSignal:
+    """Tiny controllable signal used to exercise owner-side thread lifecycle."""
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        self._callbacks.append(callback)
+
+    def emit(self, *args):
+        for callback in list(self._callbacks):
+            callback(*args)
+
+
+class _ControllableWorker:
+    """Non-threaded QThread-shaped worker that only finishes when told to."""
+    next_id = 12000
+    instances = []
+
+    def __init__(self, job, parent=None):
+        type(self).next_id += 1
+        self.request_id = type(self).next_id
+        self.job = job
+        self.finished_ok = _FakeSignal()
+        self.failed = _FakeSignal()
+        self.finished = _FakeSignal()
+        self.cancelled = False
+        self.running = False
+        self.wait_calls = []
+        type(self).instances.append(self)
+
+    def start(self):
+        self.running = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def isRunning(self):
+        return self.running
+
+    def wait(self, timeout_ms):
+        self.wait_calls.append(timeout_ms)
+        return not self.running
+
+    def finish(self):
+        self.running = False
+        self.finished.emit()
+
+
+def test_workbench_export_rejects_duplicate_running_request(extended, qapp,
+                                                             monkeypatch,
+                                                             tmp_path):
+    """Only one captured export may own the workbench at a time."""
+    import app.extensions.ui.compare_workbench as wb_mod
+    from unittest.mock import Mock, patch
+
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    try:
+        wb.set_pair(a, b)
+        assert _pump_until(qapp, lambda: wb._export_ready())
+        _ControllableWorker.instances = []
+        monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+        dialog = Mock(return_value=str(tmp_path))
+        with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory', dialog):
+            wb._export_aligned_b()
+            worker = wb._export_worker
+            assert worker is not None and worker.isRunning()
+            wb._export_blend()
+        assert dialog.call_count == 1
+        assert wb.status.text() == 'Export already in progress.'
+        worker.finish()
+        assert wb._export_worker is None
+    finally:
+        wb.close()
 
 
 def test_b08_preset_state_roundtrip_keeps_targets(qapp):
@@ -1036,7 +1124,7 @@ def test_b08_main_window_search_job_forwards_targets(extended, qapp,
 
 # ---- B16: one shared search/fingerprint pipeline for both entry points ----
 def test_b16_both_search_entry_points_share_one_pipeline(extended, qapp,
-                                                         monkeypatch):
+                                                          monkeypatch):
     """B16 gate: toolbar/main-window search and workbench search both route
     through the SAME response_search pipeline (identical stage1 shortlist ->
     fingerprint -> rank), so identical requests cannot drift apart."""
@@ -1081,6 +1169,185 @@ def test_b16_both_search_entry_points_share_one_pipeline(extended, qapp,
     assert kwargs_a['fingerprints_get'].__self__ is wb.service
     assert kwargs_b['fingerprints_get'].__self__ is extended.response_service
     assert 'cancel' in kwargs_a and 'cancel' in kwargs_b
+
+
+# ---- Worker lifecycle: replacement and window teardown ---------------------
+def _search_request():
+    return {'weights': {'tone': 1.0}, 'constraints': {}, 'targets': {},
+            'policy': 'exclude'}
+
+
+def test_workbench_repeated_search_retires_old_worker_and_rejects_stale_result(
+        extended, monkeypatch):
+    import app.extensions.ui.compare_workbench as wb_mod
+
+    _ControllableWorker.instances = []
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+    extended.show_workbench()
+    wb = extended._workbench
+    try:
+        wb._run_response_search(_search_request())
+        old = wb._search_worker
+        wb._run_response_search(_search_request())
+        current = wb._search_worker
+
+        assert old is not current
+        assert old.cancelled
+        assert old in wb._retired_workers  # strong reference until finished
+        status_after_new_request = wb.status.text()
+        old.finished_ok.emit(old.request_id, ['stale'])
+        assert wb.status.text() == status_after_new_request
+
+        old.finish()
+        assert old not in wb._retired_workers
+    finally:
+        wb.close()
+
+
+def test_workbench_ab_change_retires_search_and_rejects_stale_result(
+        extended, monkeypatch):
+    """A search completion from the previous A/B generation cannot render."""
+    import app.extensions.ui.compare_workbench as wb_mod
+
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    try:
+        wb._run_response_search(_search_request())
+        old = wb._search_worker
+        wb.set_pair(a, b)  # increments selection generation and retires search
+        assert old.cancelled
+        assert wb._search_worker is None
+        status_after_selection = wb.status.text()
+        old.finished_ok.emit(old.request_id, [])
+        assert wb.status.text() == status_after_selection
+    finally:
+        wb.close()
+
+
+def test_worker_callbacks_render_on_gui_thread(extended, qapp):
+    """Real QThread signals reach both extension widgets through QObject slots."""
+    import threading
+    from app.extensions.ui.workers import AnalysisWorker
+
+    main_thread = threading.get_ident()
+    observed = []
+    extended.show_workbench()
+    wb = extended._workbench
+    extended.show_response_search()
+    try:
+        wb.search.show_results = lambda ranked: observed.append(
+            ('workbench', threading.get_ident()))
+        extended._search_panel.show_results = lambda ranked: observed.append(
+            ('window', threading.get_ident()))
+
+        wb_worker = AnalysisWorker(lambda _worker: [])
+        wb_worker._selection_generation = wb._selection_generation
+        wb_worker.finished_ok.connect(wb._on_search_done)
+        wb._search_worker = wb_worker
+        window_worker = AnalysisWorker(lambda _worker: [])
+        window_worker.finished_ok.connect(extended._on_search_done)
+        extended._search_worker = window_worker
+        wb_worker.start()
+        window_worker.start()
+
+        assert _pump_until(qapp, lambda: len(observed) == 2), \
+            'worker callbacks were not delivered'
+        assert {name for name, _tid in observed} == {'workbench', 'window'}
+        assert all(tid == main_thread for _name, tid in observed)
+    finally:
+        wb.close()
+
+
+def test_closed_workbench_refuses_new_debounce_and_tab_work(extended, monkeypatch):
+    import app.extensions.ui.compare_workbench as wb_mod
+
+    _ControllableWorker.instances = []
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+    extended.show_workbench()
+    wb = extended._workbench
+    a, b = extended.library_panel.visible_records()[:2]
+    wb.set_pair(a, b)
+    wb.close()
+    before = len(_ControllableWorker.instances)
+    wb._compute_pair()
+    wb._ensure_spec('csd_a', a)
+    wb._on_tab_changed(wb.tabs.currentIndex())
+    assert len(_ControllableWorker.instances) == before
+
+
+class _PassiveScanWorker:
+    """Legacy scan-shaped worker: deliberately has no cancellation API."""
+    def __init__(self):
+        self.finished = _FakeSignal()
+        self.running = True
+        self.wait_calls = []
+
+    def isRunning(self):
+        return self.running
+
+    def wait(self, timeout_ms):
+        self.wait_calls.append(timeout_ms)
+        return False
+
+
+def test_extended_close_waits_for_inherited_scan_worker(extended):
+    scan = _PassiveScanWorker()
+    extended._scan_worker = scan
+    extended.close()
+    # The adapter cannot cancel this legacy-shaped worker, but does include it
+    # in bounded shutdown retention so the wrapper stays alive.
+    assert scan.wait_calls == [200]
+    assert scan in extended._retired_workers
+
+
+def test_workbench_close_cancels_waits_and_retains_running_workers(extended,
+                                                                    monkeypatch):
+    import app.extensions.ui.compare_workbench as wb_mod
+
+    _ControllableWorker.instances = []
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+    extended.show_workbench()
+    wb = extended._workbench
+    wb._run_response_search(_search_request())
+    worker = wb._search_worker
+    wb.close()
+
+    assert worker.cancelled
+    assert worker.wait_calls == [200]
+    assert worker in wb._retired_workers
+    assert wb._search_worker is None
+    worker.finish()
+    assert worker not in wb._retired_workers
+
+
+def test_extended_close_shuts_down_workbench_and_window_search_workers(
+        extended, monkeypatch):
+    import app.extensions.ui.compare_workbench as wb_mod
+    import app.extensions.ui.main_window_adapter as mw_mod
+
+    _ControllableWorker.instances = []
+    monkeypatch.setattr(wb_mod, 'AnalysisWorker', _ControllableWorker)
+    monkeypatch.setattr(mw_mod, 'AnalysisWorker', _ControllableWorker)
+    extended.show_workbench()
+    wb = extended._workbench
+    wb._run_response_search(_search_request())
+    workbench_worker = wb._search_worker
+    extended._run_search(_search_request())
+    window_worker = extended._search_worker
+
+    extended.close()
+
+    for worker in (workbench_worker, window_worker):
+        assert worker.cancelled
+        assert worker.wait_calls == [200]
+    assert workbench_worker in wb._retired_workers
+    assert window_worker in extended._retired_workers
+    assert wb._search_worker is None
+    assert extended._search_worker is None
+    workbench_worker.finish()
+    window_worker.finish()
 
 
 # ---- B15: spectrogram A/B/difference share one grid, reference and axes ----

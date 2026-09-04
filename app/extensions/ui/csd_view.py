@@ -51,13 +51,21 @@ class CsdView(QWidget):
         self._renderer = None
         self._using_gl = False
         gl = try_opengl_renderer()
-        self._plot = pg.PlotWidget(background=SURFACE_CARD)
-        self._plot.setMouseEnabled(x=True, y=True)
+        self._plot = None
         if gl is not None:
-            self._renderer = gl
-            self._using_gl = True
-        else:
+            try:
+                self._plot = gl.create_view()
+                self._renderer = gl
+                self._using_gl = True
+            except Exception:
+                # Import support does not guarantee that a native GL widget can
+                # be constructed (remote desktop and drivers commonly fail).
+                self._plot = None
+                self._renderer = FallbackCsdRenderer()
+        if self._renderer is None:
             self._renderer = FallbackCsdRenderer()
+        if self._plot is None:
+            self._plot = self._create_fallback_plot()
 
         # B09: per-source storage — storing one never discards the other.
         self._csd_by_source: dict[str, object | None] = {'A': None, 'B': None}
@@ -97,7 +105,10 @@ class CsdView(QWidget):
         self.btn_source_a.toggled.connect(self._on_source_toggled)
 
         # Plot on top
-        layout.addWidget(self._plot, 3)
+        self._plot_layout = QVBoxLayout()
+        self._plot_layout.setContentsMargins(0, 0, 0, 0)
+        self._plot_layout.addWidget(self._plot)
+        layout.addLayout(self._plot_layout, 3)
 
         # Numeric Evidence section
         bottom_box = QFrame()
@@ -118,11 +129,11 @@ class CsdView(QWidget):
         hdr_lbl.setStyleSheet(f"color: {ACCENT_GOLD}; font-weight: 600; font-size: 8.5pt;")
         header_row.addWidget(hdr_lbl, 1)
 
-        renderer_badge = ValidityChip(
+        self._renderer_badge = ValidityChip(
             text='OpenGL 3D' if self._using_gl else '2D Fallback',
             state='valid' if self._using_gl else 'warn'
         )
-        header_row.addWidget(renderer_badge, 0)
+        header_row.addWidget(self._renderer_badge, 0)
         b_lay.addLayout(header_row)
 
         self._decay_text = QTextEdit()
@@ -190,7 +201,8 @@ class CsdView(QWidget):
         src = self._selected
         result = self._csd_by_source[src]
         self.source_caption.setText(f'Showing IR {src}')
-        self._plot.setTitle(f'CSD — IR {src}')
+        if not self._using_gl:
+            self._plot.setTitle(f'CSD — IR {src}')
         if (result is None or getattr(result, 'magnitude_db', None) is None or
                 getattr(result, 'status', None) not in (None,
                                                         AnalysisStatus.OK)):
@@ -205,8 +217,43 @@ class CsdView(QWidget):
                     f'CSD unavailable for IR {src}: '
                     f'status {getattr(result, "status", "unknown")}.')
             return
-        self._renderer.render(self._plot, result, src)
+        try:
+            rendered = self._renderer.render(self._plot, result, src)
+            if self._using_gl and not rendered:
+                # Invalid mesh data is represented as an empty GL scene; keep
+                # numeric evidence visible and do not attempt unsafe 2D calls.
+                self._decay_text.setPlainText(f'CSD surface unavailable for IR {src}.')
+        except Exception:
+            if self._using_gl:
+                self._switch_to_fallback()
+                try:
+                    self._renderer.render(self._plot, result, src)
+                except Exception:
+                    self._plot.clear()
+                    self._decay_text.setPlainText(f'CSD surface unavailable for IR {src}.')
+            else:
+                self._plot.clear()
+                self._decay_text.setPlainText(f'CSD surface unavailable for IR {src}.')
         self._render_decay(result)
+
+    @staticmethod
+    def _create_fallback_plot():
+        plot = pg.PlotWidget(background=SURFACE_CARD)
+        plot.setMouseEnabled(x=True, y=True)
+        return plot
+
+    def _switch_to_fallback(self) -> None:
+        """Replace a failed GL canvas with the deterministic 2D renderer."""
+        if not self._using_gl:
+            return
+        old_plot = self._plot
+        self._plot = self._create_fallback_plot()
+        self._plot_layout.replaceWidget(old_plot, self._plot)
+        old_plot.deleteLater()
+        self._renderer = FallbackCsdRenderer()
+        self._using_gl = False
+        self._renderer_badge.set_state('warn', '2D Fallback',
+                                       'OpenGL unavailable; using deterministic 2D view.')
 
     def _render_decay(self, csd_result) -> None:
         lines = []
