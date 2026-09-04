@@ -1,99 +1,257 @@
-# BestIR — คัดกรอง IR อัตโนมัติ
+<div align="center">
 
-แอป desktop (Windows) สำหรับโหลดไฟล์ IR (Impulse Response) ทั้งโฟลเดอร์ เพื่อ **วิเคราะห์โทนอัตโนมัติ → คัดกรอง/จัดอันดับตามโทนที่ต้องการ → ฟัง A/B ในแอป → ส่งออกไฟล์ที่รอด** — เหมาะกับ workflow ที่เริ่ม sound signal chain จาก IR ก่อนเลือก amp
+# 🎸 BestIR Extended
+### Guitar Cabinet Impulse Response Screener, Tone Match & Compare Workbench
 
-## เริ่มใช้งาน
+[![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2064--bit-0078D6.svg)](https://www.microsoft.com/windows)
+[![GUI](https://img.shields.io/badge/GUI-PySide6%20%7C%20PyQtGraph-41CD52.svg)](https://pyside.org)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-### วิ่งจากซอร์ส (ต้องมี Python 3.12+)
-```bat
-pip install -r requirements.txt
-run.bat
-```
+*A precision desktop application for guitarists, audio engineers, and producers to organize, analyze, match, audition, and blend Impulse Responses (IR) with mathematical accuracy and musician-friendly feedback.*
 
-### ใช้ไฟล์ .exe
-สั่ง build ครั้งเดียว:
-```bat
-pip install pyinstaller
-python -m PyInstaller BestIR.spec --noconfirm
-```
-แล้วเอา `dist\BestIR.exe` ไปใช้ได้เลย (ไม่ต้องติดตั้ง Python)
+[**🇹🇭 ภาษาไทย (Thai Manual)**](#-คู่มือการใช้งานภาษาไทย) | [**🇬🇧 English Manual**](#-english-user-manual)
 
-## วิธีใช้งาน
+---
 
-1. **Add Folder…** — เลือกโฟลเดอร์ IR (สแกน recursive รองรับ wav/flac/aiff, mono/stereo ทุก sample rate) ไฟล์จะถูกวิเคราะห์และเก็บ cache ไว้ รอบหน้าสแกนไวมาก
-2. ตารางซ้ายแสดงทุกไฟล์พร้อมเมตริก — ใช้ **Search / SR / Ch / Tags / Flat ≤** กรอง
-3. เลือกโทนที่ต้องการในแผงล่าง:
-   - **Preset** — Flat / Bright / Dark / Scooped / Mid-forward / Tight low / Vintage
-   - **Bands** — สไลเดอร์ 7 ย่าน (Sub…Air) หน่วย dB
-   - **Reference** — เลือก IR ที่ชอบในตาราง แล้วกด **Use as Reference** ทางขวา เพื่อหา IR ที่โทนใกล้เคียง
-4. กด **Rank** (หรือ `Ctrl+R`) — ตารางจะเรียงตามความใกล้เคียง target (หน่วย dB RMS, แถว Top-N ไฮไลต์สีเขียว) และกราฟไฮไลต์ Top-N ให้ด้วย
-5. คลิกแถวเพื่อดูรายละเอียด (band bars, peak/notch, waveform) และ **Play** เพื่อฟัง IR ผ่านสัญญาณทดสอบ (pink noise / DI power chord / palm mute / ไฟล์ WAV ของคุณเอง)
-   - **A/B ◀ ▶** สลับฟัง IR ถัดไป/ก่อนหน้าในลิสต์ที่กรองไว้ (หรือกด Space)
-   - **Level match** ปรับความดังเท่ากันอัตโนมัติ กันหูถูกหลอกว่า "ดังกว่า = ดีกว่า"
-6. เลือกแถวที่รอด (Ctrl+คลิก หลายแถว) → **Export Selected…** หรือ **Export Top-N…** เพื่อ copy ไฟล์ไปโฟลเดอร์ใหม่
+</div>
 
-## Tone Match — หา IR ให้เข้ากับ signal chain ของคุณ
+## 📑 สารบัญ / Table of Contents
+- [🇹🇭 คู่มือการใช้งานภาษาไทย](#-คู่มือการใช้งานภาษาไทย)
+  - [1. บทนำและคุณสมบัติเด่น](#1-บทนำและคุณสมบัติเด่น)
+  - [2. การติดตั้งและเปิดใช้งาน](#2-การติดตั้งและเปิดใช้งาน)
+  - [3. หน้าต่างหลัก (Main Screener)](#3-หน้าต่างหลัก-main-screener)
+  - [4. ระบบค้นหาและการคัดเกรด (Response Search)](#4-ระบบค้นหาและการคัดเกรด-response-search)
+  - [5. โต๊ะเปรียบเทียบ A/B (Compare A/B Workbench)](#5-โต๊ะเปรียบเทียบ-ab-compare-ab-workbench)
+  - [6. การผสมสัญญาณและการส่งออก (Phase & Blend Export)](#6-การผสมสัญญาณและการส่งออก-phase--blend-export)
+- [🇬🇧 English User Manual](#-english-user-manual)
+  - [1. Overview & Key Features](#1-overview--key-features)
+  - [2. Installation & Quick Start](#2-installation--quick-start)
+  - [3. Main Screener Interface](#3-main-screener-interface)
+  - [4. Response-Aware Search & Presets](#4-response-aware-search--presets)
+  - [5. Compare A/B Workbench](#5-compare-ab-workbench)
+  - [6. Phase Alignment & Blend Export](#6-phase-alignment--blend-export)
 
-แท็บ **Tone Match** คือ workflow ออกแบบมาเพื่อคำถามว่า *"DI กีตาร์ของผม + IR ตัวไหน = โทนที่ผมอยากได้"*
+---
 
-1. **อัด DI** — กด `● Record DI` แล้วเล่น riff เปล่า ๆ 10–20 วินาที (ปรับความยาวได้ 5–60 วิ) หรือ `Load DI WAV…` ถ้ามีไฟล์อยู่แล้ว
-2. **เช็ค Tone** — แอปวิเคราะห์ DI ทันทีเป็น **Tone Ref** (tilt, flatness, จุด peak ของ pickup) แสดงในแท็บและเป็นเส้นเหลืองบนกราฟ
-3. **เลือกโทน output ที่อยากได้** — Balanced (แบน) / Bright / Dark / Scooped / … หรือ `Match WAV tone…` (เอาเพลง/เดโม่ที่ชอบมาเป็นเป้าหมาย)
-4. **ระบบคัด Tone-Matching IR** — กด `Rank` ระบบจะคำนวณ *needed IR curve* = `output ที่อยากได้ − DI tone` แล้วจัดอันดับ IR ที่แมสนั้นได้ที่สุด (เส้นประสีส้มบนกราฟคือ "IR ที่คุณต้องการ")
-5. **ดู EQ ของ IR + EQ output สุดท้าย** — คลิก IR ตัวไหนก็ได้ เส้นเขียว = EQ ของ IR, เส้นฟ้า = **EQ ของ output จริง** (DI + IR) พร้อมข้อความบอกระยะห่างจาก target และ tilt ของ output
-6. **ฟังผลลัพธ์** — ใน Audition เลือก Source เป็น `Recorded DI` แล้วกด Play จะได้ยิน DI ของคุณผ่าน IR ตัวนั้นจริง ๆ (A/B ◀ ▶ สลับเทียบได้)
+# 🇹🇭 คู่มือการใช้งานภาษาไทย
 
-> หลักการ: magnitude ของการ convolve = ผลบวกของ magnitude (dB) พอดี ระบบจึง "ทำนาย" EQ ของ output ได้แม่นโดยไม่ต้องเรนเดอร์เสียง (ตรวจสอบแล้วต่างจาก convolution จริง < 0.5 dB)
+## 1. บทนำและคุณสมบัติเด่น
+**BestIR Extended** ออกแบบมาเพื่อแก้ปัญหา "IR Hoarding" ของมือกีตาร์และซาวด์เอ็นจิเนียร์ ที่มีไฟล์ IR สะสมนับพันไฟล์แต่เสียเวลาในการนั่งฟังทีละไฟล์ ระบบนี้ใช้ Digital Signal Processing (DSP) ในการถอดรหัสบุคลิกเสียง (Acoustic Fingerprint) เพื่อค้นหาและคัดกรองตัวที่ดีที่สุดอย่างรวดเร็ว
 
+### คุณสมบัติเด่น:
+- **Instant Tonal Fingerprinting:** วิเคราะห์ Spectral Balance (Low, Low-Mid, Mid, High, Air), ความแบนราบ (Flatness), และความเอียงของความถี่ (Spectral Tilt)
+- **Acoustic Transient & Decay Analysis:** วัดความเร็วหัวโน้ต (Time to peak), พลังงานช่วงต้น (Early energy), ความหนาแน่นของเนื้อเสียง และการสลายตัวของย่านต่ำ (D20 Decay)
+- **Intelligent Tone Matching:** ปรับจูนค้นหา IR ที่โทนใกล้เคียงกับ Reference Track หรือสัญญาณกีตาร์ DI
+- **Compare A/B Workbench:** สลับฟัง A/B แบบไม่มีสะดุด และดูความต่างของเสียงที่อธิบายเป็น **"ภาษานักดนตรี"**
+- **Phase & Blend Prediction:** ตรวจสอบการหักล้างของเฟส (Comb filtering) อัตโนมัติ พร้อมปรับชดเชยเวลา (Time delay) และขั้วสัญญาณ (Polarity) ให้ตรงกันก่อนผสมเสียง
 
-> คลิกบนเส้นกราฟเพื่อเลือก IR นั้นได้เลย / ชี้เมาส์เพื่อดูชื่อไฟล์
+---
 
-## เมตริกที่แอปวัด
+## 2. การติดตั้งและเปิดใช้งาน
+โปรแกรมถูกสร้างมาเป็น **Portable Executable** บน Windows 64-bit ไม่ต้องติดตั้งซอฟต์แวร์เสริม
 
-ทุก IR ถูก normalize ที่ย่านหลัก 80 Hz–8 kHz (จุด 0 dB = ค่าเฉลี่ยย่านหลัก) แล้ววัด:
+1. ดาวน์โหลดไฟล์ `BestIRExtended.exe` จากโฟลเดอร์ `dist/` หรือหน้า Releases
+2. ดับเบิลคลิกเปิดโปรแกรมได้ทันที
+3. *(สำหรับนักพัฒนา)* รันผ่าน Source code:
+   ```powershell
+   python -m pip install -r requirements.txt
+   python bestir_extended.py
+   ```
 
-| เมตริก | ความหมาย |
-|---|---|
-| Flat | ค่าเบี่ยงเฉลี่ยจากแบน (dB) ช่วง 80 Hz–8 kHz — ยิ่งต่ำยิ่ง flat |
-| Tilt | ความชัน (dB/octave) 200 Hz–8 kHz — บวก = bright, ลบ = dark |
-| Sub…Air | ระดับเฉลี่ยแต่ละย่าน (dB เทียบจุด 0) |
-| Peak / Notch | จุด resonant โดด/บุ๋มที่แรงที่สุด (เทียบเส้น smooth 1-octave) |
-| Len ms | ความยาวที่ได้ยินจริง (onset → −60 dB) |
+---
 
-**Tags** อย่าง Bright/Dark/Scooped/Boomy/Thin/Fizzy ถูกสรุปโดยเทียบกับ median ของ library ทั้งหมด (ไลบรารีน้อยกว่า 20 ไฟล์ใช้เกณฑ์สัมบูรณ์) จึงแยกแยะภายใน pack เดียวกันได้
+## 3. หน้าต่างหลัก (Main Screener)
 
-## คำสั่งอื่น
+### 3.1 การจัดการคลังไฟล์ (Library Management)
+- **Add Folder…:** เพิ่มโฟลเดอร์ที่เก็บไฟล์ IR (`.wav`) ระบบจะสแกนและแคชข้อมูลอัตโนมัติ
+- **Remove Folder:** เลือกโฟลเดอร์ในรายการแล้วกดปุ่มนี้เพื่อนำโฟลเดอร์และรายการ IR ออกจากคลังทันที
+- **Rescan (force):** สแกนไฟล์ทั้งหมดใหม่อีกครั้งเพื่ออัปเดตไฟล์ที่มีการเปลี่ยนแปลง
 
-```bash
-# วิเคราะห์ผ่าน command line ดูตารางเมตริก
-python -m app.smoke "E:\path\to\IRs"
+### 3.2 แถบตัวกรองและค้นหา (Filters Bar)
+- **Search:** พิมพ์คำค้นหาชื่อไฟล์หรือตำแหน่งไมค์ (เช่น `57`, `CapEdge`, `Cone`)
+- **SR / Ch:** กรองตาม Sample Rate (`44.1k`, `48k`, `96k`) หรือช่องสัญญาณ (`Mono` / `Stereo`)
+- **Filters ▾:** แผงกรองพับเก็บได้ สำหรับเลือกแท็ก และกรองค่า Flatness
 
-# รัน unit tests
-python -m pytest tests/ -q
+### 3.3 การจัดอันดับโทนเสียง (Tone Screener & Presets)
+- เลือกพรีเซ็ตเป้าหมายที่ต้องการ เช่น:
+  - `Flat`: โทนสมดุล ไม่มีย่านใดยื่นล้ำ
+  - `Tight low`: ตัดย่านบวมต่ำกว่า 100 Hz สำหรับเสียงแตกริฟฟ์เร็ว (Fast chugs)
+  - `Mid-forward`: ชูย่านกลาง ดันโซโล่ให้ทะลุมิกซ์
+  - `Scooped`: เว้ากลาง หนักหัว-ท้าย สไตล์โมเดิร์นเมทัล
+- กด **`Rank`** ระบบจะเรียงลำดับ IR จากทั้งคลังที่ใกล้เคียงกับพรีเซ็ตที่สุดขึ้นมาอันดับต้นๆ ทันที
 
-# selftest (ไม่เปิดหน้าจอ)
-python -m app.main --selftest
-```
+### 3.4 เครื่องเล่นทดลองฟัง (Audition Engine)
+- กด **Spacebar** หรือปุ่ม **`Play`** เพื่อฟังเสียง
+- สลับสัญญาณ Source ได้ระหว่าง Pink Noise หรือคลิก **`Load…`** เพื่อใส่ไฟล์กีตาร์แห้ง (Clean DI track)
+- ปุ่ม **`Level match`** ช่วยควบคุมระดับความดังของทุก IR ให้เท่ากันขณะสลับฟัง ป้องกันอาการหูหลอก (Loudness bias)
 
-## โครงสร้าง
+---
 
-```
-app/core/   audio_io, analysis (DSP), matching, presets, cache, scanner, audition, exporter, tonematch
-app/ui/     model, library_panel, plot_panel, screen_panel, inspector_panel, main_window, workers
-tests/      unit tests + offscreen GUI smoke test (ครอบ DI/tone-match workflow)
-```
+## 4. ระบบค้นหาและการคัดเกรด (Response Search)
+กดปุ่ม **`Response Search`** ที่แถบเครื่องมือด้านบน เพื่อค้นหา IR ตามลักษณะทางกายภาพของเสียง:
+- **Simple Mode:** กำหนดเป้าหมายการตอบสนองที่ต้องการโดยตรง:
+  - *Low-end D20 target (ms):* กำหนดความสั้น-ยาวของหางเบส (เหมาะกับเลือกระหว่างกีตาร์ริธึ่มแน่นๆ กับโซโล่ฉ่ำๆ)
+  - *Fast attack target (ms):* กำหนดความกระชับของหัวโน้ต
+  - *Boxiness target (dB):* ควบคุมระดับความอู้เป็นกล่องของตู้ลำโพง
+- **Advanced Mode:** ปรับน้ำหนักคะแนน (Weights) แต่ละย่านความถี่ และกำหนดนโยบาย Missing metric policy
 
-Cache: `%LOCALAPPDATA%\BestIR\cache.json` (ตรวจจาก mtime+size — แก้ไฟล์ IR แล้วจะถูกวิเคราะห์ใหม่เอง)
+---
 
-## Extended build — เทียบ A/B และค้นหาด้วย response (สำหรับสายละเอียด)
+## 5. โต๊ะเปรียบเทียบ A/B (Compare A/B Workbench)
+เลือก IR 2 ตัวในตาราง แล้วกดปุ่ม **`Compare A/B`**:
 
-`BestIRExtended.exe` (build ด้วย `python -m PyInstaller BestIRExtended.spec`) คือเวอร์ชันขยายที่ **ไม่แตะฟีเจอร์เดิมแม้แต่บรรทัดเดียว** แต่เพิ่ม:
+### 5.1 ส่วนหัว Dual-Deck Header
+- แสดงชื่อไฟล์ IR A (สีฟ้า Electric Cyan) และ IR B (สีเขียว Neon Emerald)
+- ปุ่ม **`⇄`** สลับ IR ฝั่ง A และ B ทันที
+- แถบเลื่อนแนวนอนอัตโนมัติ ไม่บังคับให้หน้าต่างล้นจอเมื่อชื่อไฟล์ยาว
 
-- **Compare A/B** — เลือก 2 แถวในตาราง (หรือกด Set A/Set B) เพื่อเทียบ IR ที่โทนใกล้กันแบบละเอียด:
-  - **Waveform**: onset/peak envelope, บอก polarity และ rise time (พร้อมเงื่อนไขความถูกต้อง)
-  - **CSD waterfall**: cumulative spectral decay แบบ heatmap + ตัวเลข band-decay (D10/D20/D30) — แยก low-end resonance ที่โทนเหมือนกันแต่ตัวดับต่างกัน
-  - **Spectrogram**: A / B / A−B พร้อม persistence score (boxiness/bloom/fizz แบบตัวเลข ไม่ใช่แค่ภาพ)
-  - **Phase & Blend**: phase/group delay เฉพาะ bin ที่เชื่อถือได้, เสนอ delay/polarity สำหรับ blend, **ทำนาย EQ ของ A+B** ที่ตรวจยืนยันกับ convolution จริง (±0.25 dB) พร้อมความเสี่ยง comb cancellation
-- **Response Search** — จัดอันดับรอบสองจาก shortlist ของโทน: Tight / Fast attack / Low boxiness / Smooth GD / Blend-safe พร้อม **คำอธิบายว่าทำไมแต่ละตัวได้อันดับนั้น** (score breakdown)
+### 5.2 แท็บการวิเคราะห์ทั้ง 5 ด้าน
+1. **📊 Summary (สรุปสำหรับนักดนตรี):**
+   - **จุดต่างที่ควรลองฟัง (A/B):** สรุปเปรียบเทียบลักษณะเสียงสั้นกระชับเข้าใจง่าย
+     - ⚡ *หัวโน้ต*: ระบุฝั่งที่หัวโน้ตพุ่งไวกว่า หรือมีพลังงานช่วงต้นชัดเจน
+     - ⌛ *หางเสียงเบส*: ระบุฝั่งที่ย่านต่ำเก็บตัวไวกว่าหรือค้างนานกว่า
+     - ▣ *ความอู้/กลางต่ำ*: ระบุฝั่งที่มีย่านกลางต่ำค้างเด่น (หนาขึ้นหรืออาจจะอู้)
+     - ↔ *เวลาตอบสนอง*: ระบุย่านความถี่ที่มีการหน่วงเวลาต่างกัน
+   - ตารางตัวเลขเปรียบเทียบละเอียด (dB, ms, %) สำหรับใช้อ้างอิงทางเทคนิค
+2. **📈 Waveform & Envelope:** แสดงรูปคลื่น Impulse และ Envelope สันโค้งพลังงาน พร้อมจุด Marker บอก Onset Peak
+3. **🌊 CSD Waterfall:** พล็อต Waterfall แสดงการสลายตัวของพลังงานตามกาลเวลา (Cumulative Spectral Decay) พร้อมตัววัด D10, D20, D30 แยกแต่ละย่าน
+4. **🔥 Spectrogram Heatmaps:** แผนที่ความร้อนเปรียบเทียบ Spectral Density และแสดงผลต่าง (Difference Map)
+5. **⚡ Phase & Blend Prediction:** วิเคราะห์เฟสและความเข้ากันได้ (รายละเอียดในข้อ 6)
 
-สถาปัตยกรรมเป็น additive extension (Tier 0 เดิม / Tier 1 fingerprint cache / Tier 2 on-demand matrices) — รายละเอียดใน `docs/IR_COMPARISON_AND_MATCHING_PLAN_V2.md` และ QA ใน `docs/WP09_QA.md`
+---
+
+## 6. การผสมสัญญาณและการส่งออก (Phase & Blend Export)
+
+### 6.1 ระบบจัดเฟสและพรีวิว (Phase Alignment Engine)
+- ระบบจะคำนวณหาความต่างของเวลาที่แม่นยำระดับเสี้ยวตัวอย่าง (Fractional delay samples) และตรวจจับขั้วสัญญาณ (+/-)
+- มีป้ายแจ้งเตือน **Comb Risk Alert**:
+  - `✓ Safe`: เฟสเข้ากันได้ดี ผสมแล้วเสียงหนาแน่นขึ้น
+  - `⚠ Medium`: มีการหักล้างในบางย่านความถี่
+  - `✕ High`: มี Phase Cancellation รุนแรง (เสี่ยงเกิดเสียงกระป๋องหรือเบสหาย)
+- ตัวเลื่อน **Blend Ratio (0% - 100% B)**: เลื่อนเพื่อพรีวิวกราฟเสียงที่จะได้จากการผสมแบบเรียลไทม์
+
+### 6.2 การส่งออกไฟล์แบบ Non-destructive
+ปุ่ม Export จะปลดล็อกให้ใช้งานเมื่อสัญญาณทั้งสองผ่านการวิเคราะห์สมบูรณ์:
+- **`Export B (aligned)`**: สร้างไฟล์ WAV ของ IR B ที่ถูกเลื่อนเวลาและกลับเฟสให้ตรงกับ IR A เรียบร้อยแล้ว (นำไปใช้คู่กับ A ใน Multi-mic setup ได้ทันทีโดยไม่บวมเฟส)
+- **`Export Blend WAV`**: รวมเสียง IR A + B ตามอัตราส่วนที่เลือกบน Blend slider ออกมาเป็นไฟล์ IR สำเร็จรูป
+- **`Export Report (JSON)`**: ส่งออกรายงานทางเทคนิค เก็บค่าสถิติ, ค่าหน่วงเวลา, และ Checksum ของคู่สัญญาณไว้ตรวจสอบย้อนหลัง
+
+---
+---
+
+# 🇬🇧 English User Manual
+
+## 1. Overview & Key Features
+**BestIR Extended** solves "IR Hoarding" syndrome. Instead of spending hours auditioning thousands of cabinet impulse response WAV files, BestIR extracts acoustic and spectral fingerprints using advanced Digital Signal Processing (DSP) to rank, inspect, match, and blend IRs mathematically and intuitively.
+
+### Core Capabilities:
+- **Tonal Fingerprinting:** Automated quantification of 5 spectral sub-bands (Low, Low-Mid, Mid, Mid-High, Air), spectral flatness, and dB/octave tilt.
+- **Transient & Temporal Dynamics:** Micro-timing analysis including Time-to-Peak, Rise Time (10-90%), Early Energy Ratio (0-5ms), Crest Factor, and Low-frequency decay ($D_{20}$).
+- **Curve-Match Ranking:** Instant scoring against musical target presets or external clean DI recordings.
+- **Compare A/B Workbench:** Gapless dual-deck auditioning with concise, **musician-focused acoustic difference explanations**.
+- **Phase & Blend Engine:** Automated fractional-sample cross-correlation alignment, polarity detection, comb-risk scoring, and atomic WAV export.
+
+---
+
+## 2. Installation & Quick Start
+Packaged as a standalone Windows 64-bit portable binary with zero external dependencies.
+
+1. Download `BestIRExtended.exe` from `dist/` or GitHub Releases.
+2. Launch the application by double-clicking.
+3. *(Developers)* Run from source:
+   ```powershell
+   python -m pip install -r requirements.txt
+   python bestir_extended.py
+   ```
+
+---
+
+## 3. Main Screener Interface
+
+### 3.1 Folder Management
+- **Add Folder…:** Select directories containing `.wav` impulse responses. Background workers scan, fingerprint, and persist them in a local cache.
+- **Remove Folder:** Select one or more folders from the list and click to prune them from the library and in-memory table immediately.
+- **Rescan (force):** Invalidates the cache and re-analyzes all files under configured roots.
+
+### 3.2 Filtering & Searching
+- **Search:** Instant substring filter across file paths and mic naming conventions.
+- **SR / Ch:** Filter by Sample Rate (`44.1k`, `48k`, `96k`) or Channel count (`Mono` / `Stereo`).
+- **Filters ▾:** Expandable drawer for checkable tags and maximum flatness constraints.
+
+### 3.3 Tonal Screener & Target Presets
+Select an acoustic target curve to rank your library:
+- `Flat`: Linear, unhyped reference balance across 80 Hz - 8 kHz.
+- `Tight Low`: High-pass slope below 100 Hz engineered for fast palm-muted rhythm riffs.
+- `Mid-forward`: Enhanced vocal-range midrange to punch solo lines through dense mixes.
+- `Scooped`: Aggressive V-shape curve tailored for modern heavy metal.
+Click **`Rank`** to sort the entire library by shape similarity (RMS error score, lower = closer).
+
+### 3.4 Auditioning Engine
+- Press **Spacebar** or click **`Play`** to audition the selected row.
+- Toggle between synthetic Pink Noise or click **`Load…`** to feed your own DI guitar tracks.
+- Enable **`Level match`** to normalize playback levels dynamically, eliminating perceptual volume bias.
+
+---
+
+## 4. Response-Aware Search & Presets
+Click **`Response Search`** on the main toolbar to filter candidates using physical response criteria:
+- **Simple Mode:** Focus directly on desired acoustic outcomes:
+  - *Low-end D20 target (ms):* Desired bass decay duration.
+  - *Fast attack target (ms):* Onset transient snap.
+  - *Boxiness target (dB):* Resonance persistence in the low-mid spectrum.
+- **Advanced Mode:** Expose custom objective weights and missing-metric rejection policies.
+
+---
+
+## 5. Compare A/B Workbench
+Select two records in the library table and click **`Compare A/B`**:
+
+### 5.1 Dual-Deck Header
+- Clear slot distinction: **IR A** (Electric Cyan) and **IR B** (Neon Emerald).
+- Click **`⇄`** to swap IR A and IR B instantaneously.
+- Horizontally scrollable container ensures zero window overflow on high-DPI displays (120% – 175%).
+
+### 5.2 Five Analysis Tabs
+1. **📊 Summary (Musician-Friendly):**
+   - **Key Differences Breakdown:** Clear, actionable bullets:
+     - ⚡ *Attack & Snap*: Pinpoints which IR possesses a faster onset or punchier early energy.
+     - ⌛ *Low Decay*: Explains which IR tightens up bass faster vs. sustains longer.
+     - ▣ *Boxiness / Body*: Identifies resonant buildup in the lower midrange.
+     - ↔ *Time Response*: Highlights differential group delay across specific frequency bands.
+   - Comprehensive numerical evidence table ($dB$, $ms$, $\%$) accessible on the left.
+2. **📈 Waveform & Envelope:** Signed sample plots, Hilbert envelope curves, and onset peak markers.
+3. **🌊 CSD Waterfall:** Cumulative Spectral Decay heatmap displaying $D_{10}$, $D_{20}$, and $D_{30}$ decay metrics.
+4. **🔥 Spectrogram Heatmaps:** Time-frequency spectral density plots with normalized difference maps.
+5. **⚡ Phase & Blend Prediction:** Phase curves, group delay, and blend prediction (details below).
+
+---
+
+## 6. Phase Alignment & Blend Export
+
+### 6.1 Alignment & Risk Mitigation
+- Automated cross-correlation estimates native time delay ($\tau$ samples) down to sub-sample precision and detects phase inversion.
+- **Comb Risk Chip:**
+  - `✓ Comb Risk: Safe`: Minimal phase cancellation across the critical acoustic band.
+  - `⚠ Comb Risk: Medium`: Noticeable cancellation notches present at specific frequencies.
+  - `✕ Comb Risk: High`: Severe phase cancellation (comb filtering will hollow out tone and eliminate bass punch).
+- **Blend Slider (0% - 100% B):** Interactive slider updating predicted frequency response in real time.
+
+### 6.2 Non-Destructive Export Options
+Source files remain strictly read-only. Export buttons become enabled once pair verification succeeds:
+- **`Export B (aligned)`:** Produces a copy of IR B advanced by fractional delay and polarity-corrected to match IR A perfectly (ideal for multi-mic cabinet setups).
+- **`Export Blend WAV`:** Exports the composite $A + B$ audio mix according to the current blend ratio slider.
+- **`Export Report (JSON)`:** Exports full measurement metadata, checksums, delays, and acoustic metrics for auditing and record-keeping.
+
+---
+
+## 🛠 Tech Stack & Dependencies
+- **Core:** Python 3.12+ / 3.14 compatible, NumPy, SciPy (Signal processing, FFT, Hilbert transform, cross-correlation)
+- **Audio I/O:** `soundfile` (libsndfile backend), `sounddevice` (PortAudio backend)
+- **GUI Engine:** `PySide6` (Qt for Python), `pyqtgraph` (Hardware-accelerated real-time plotting)
+- **Design System:** Custom tactile **Boro UI** design tokens (Obsidian chassis, Boro Honey Gold accents, Electric Cyan & Neon Emerald channels)
+
+---
+
+## 📄 License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
