@@ -8,4 +8,6 @@ __pycache__/
 *.log
 test export/
 .codex-pytest-basetemp/
+IR/
+
 
