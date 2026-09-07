@@ -89,9 +89,23 @@ def make_snapshot_from_fingerprints(
         st = getattr(blend_res, 'status', None)
         if st == AnalysisStatus.OK or str(st).lower().endswith('ok'):
             blend_valid = True
-            blend_loss_db = getattr(blend_res, 'worst_notch_depth_db', None)
-            blend_loss_band = getattr(blend_res, 'worst_notch_band', '')
-            blend_ratio = getattr(blend_res, 'ratio', 0.5)
+            raw_loss = getattr(blend_res, 'worst_cancellation_db', None)
+            if raw_loss is None:
+                raw_loss = getattr(blend_res, 'worst_notch_depth_db', None)
+            blend_loss_db = raw_loss
+
+            raw_freq = getattr(blend_res, 'worst_cancellation_freq', None)
+            raw_band = getattr(blend_res, 'worst_notch_band', '')
+            if not raw_band and raw_freq is not None:
+                raw_band = f'{raw_freq:.0f} Hz'
+            blend_loss_band = raw_band
+
+            ratios = getattr(blend_res, 'ratios', ())
+            if ratios:
+                # configured ratio nearest 50% B
+                blend_ratio = float(min(ratios, key=lambda r: abs(float(r) - 0.5)))
+            else:
+                blend_ratio = getattr(blend_res, 'ratio', 0.5)
 
     # Check identical
     is_identical = False

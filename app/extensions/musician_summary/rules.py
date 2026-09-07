@@ -216,14 +216,27 @@ def evaluate_claims(snapshot: SummarySnapshot) -> list[Claim]:
 
     # 5. Blend Claims
     if snapshot.blend_valid:
-        if snapshot.blend_loss_db is not None and snapshot.blend_loss_db <= THRESH_BLEND_LOSS_DB:
+        # B04 convention: positive loss indicates cancellation deficit (e.g. 8.0 dB),
+        # or negative if using deficit convention (e.g. -8.0 dB).
+        is_cancelling = False
+        loss_val = 0.0
+        if snapshot.blend_loss_db is not None:
+            if snapshot.blend_loss_db <= -3.0:
+                is_cancelling = True
+                loss_val = abs(snapshot.blend_loss_db)
+            elif snapshot.blend_loss_db >= 3.0:
+                is_cancelling = True
+                loss_val = snapshot.blend_loss_db
+
+        if is_cancelling:
+            band_str = snapshot.blend_loss_band.strip() if snapshot.blend_loss_band else ''
             claims.append(Claim(
                 claim_id='blend_cancel_warn',
                 subject='pair',
                 category='blend',
                 template_key='BLEND_CANCEL_WARN',
-                template_params={'band': snapshot.blend_loss_band or 'บางย่าน' if snapshot.blend_loss_band else 'some frequencies',
-                                 'loss': abs(snapshot.blend_loss_db)},
+                template_params={'band': band_str or 'บางย่าน',
+                                 'loss': loss_val},
                 evidence_ids=('blend_loss_db',),
             ))
         else:

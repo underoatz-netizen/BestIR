@@ -119,3 +119,80 @@ def test_no_crash_on_empty_or_edge_cases():
     assert summary is not None
     assert isinstance(summary.formatted_text(), str)
     assert len(summary.formatted_text()) > 0
+
+
+def test_blend_cancellation_warning_with_blend_prediction():
+    """Verify that a real or mock BlendPrediction with cancellation emits BLEND_CANCEL_WARN.
+    
+    Checks that worst_cancellation_db and worst_cancellation_freq are correctly adapted
+    and not masked by BLEND_NO_LOSS.
+    """
+    from app.extensions.musician_summary.adapter import make_snapshot_from_fingerprints
+    from app.extensions.contracts import BlendPrediction, SourceKey, PairComparisonConfig, AnalysisStatus
+
+    key_a = SourceKey(path='a.wav', mtime_ns=0, size=100, sample_rate=48000, channels=1)
+    key_b = SourceKey(path='b.wav', mtime_ns=0, size=100, sample_rate=48000, channels=1)
+    cfg = PairComparisonConfig()
+
+    # Case 1: Positive cancellation loss (+8 dB, 2500 Hz)
+    blend_pred_pos = BlendPrediction(
+        key_a=key_a,
+        key_b=key_b,
+        cfg=cfg,
+        status=AnalysisStatus.OK,
+        ratios=(0.0, 0.25, 0.5, 0.75, 1.0),
+        worst_cancellation_db=8.0,
+        worst_cancellation_freq=2500.0,
+    )
+
+    snap_pos = make_snapshot_from_fingerprints(
+        fp_a=None, fp_b=None, name_a='IR_A', name_b='IR_B', blend_res=blend_pred_pos
+    )
+    assert snap_pos.blend_valid is True
+    assert snap_pos.blend_loss_db == 8.0
+    assert snap_pos.blend_loss_band == '2500 Hz'
+    assert snap_pos.blend_ratio == 0.5
+
+    sum_th_pos = generate_summary(snap_pos, lang=Language.TH)
+    assert "ลดลง 8.0 dB" in sum_th_pos.blend_note
+    assert "2500 Hz" in sum_th_pos.blend_note
+    assert "ยังไม่พบการหักล้าง" not in sum_th_pos.blend_note
+
+    sum_en_pos = generate_summary(snap_pos, lang=Language.EN)
+    assert "drops by 8.0 dB" in sum_en_pos.blend_note
+    assert "2500 Hz" in sum_en_pos.blend_note
+    assert "no significant phase cancellation" not in sum_en_pos.blend_note
+
+    # Case 2: Negative convention cancellation loss (-8 dB, 2500 Hz)
+    blend_pred_neg = BlendPrediction(
+        key_a=key_a,
+        key_b=key_b,
+        cfg=cfg,
+        status=AnalysisStatus.OK,
+        ratios=(0.0, 0.5, 1.0),
+        worst_cancellation_db=-8.0,
+        worst_cancellation_freq=2500.0,
+    )
+    snap_neg = make_snapshot_from_fingerprints(
+        fp_a=None, fp_b=None, name_a='IR_A', name_b='IR_B', blend_res=blend_pred_neg
+    )
+    sum_th_neg = generate_summary(snap_neg, lang=Language.TH)
+    assert "ลดลง 8.0 dB" in sum_th_neg.blend_note
+    assert "2500 Hz" in sum_th_neg.blend_note
+
+    # Case 3: Safe / minimal loss (e.g. 0.5 dB) emits BLEND_NO_LOSS
+    blend_pred_safe = BlendPrediction(
+        key_a=key_a,
+        key_b=key_b,
+        cfg=cfg,
+        status=AnalysisStatus.OK,
+        ratios=(0.5,),
+        worst_cancellation_db=0.5,
+        worst_cancellation_freq=1000.0,
+    )
+    snap_safe = make_snapshot_from_fingerprints(
+        fp_a=None, fp_b=None, name_a='IR_A', name_b='IR_B', blend_res=blend_pred_safe
+    )
+    sum_th_safe = generate_summary(snap_safe, lang=Language.TH)
+    assert "ยังไม่พบการหักล้าง" in sum_th_safe.blend_note
+
