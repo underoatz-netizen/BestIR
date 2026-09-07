@@ -16,17 +16,14 @@ import os
 import numpy as np
 
 from ..core.analysis import AnalysisResult
-from .adapters import LegacyIRAdapter, make_read_only
+from .adapters import LegacyIRAdapter
 from .cache import FingerprintCache
-from .contracts import (ALGO_VERSION, AnalysisStatus, AudioBuffer,
+from .contracts import (AnalysisStatus, AudioBuffer,
                         BlendPrediction, CSDResult, DecayConfig, DecayResult,
                         EnvelopeConfig, EnvelopeResult, PairComparisonConfig,
                         PairComparisonResult, PhaseConfig, PhaseResult,
                         PreparedIR, PreprocessingConfig, ResponseFingerprint,
                         SourceKey, SpectrogramResult, TimeFrequencyConfig)
-
-_UNPROCESSED = (AnalysisStatus.SILENT, AnalysisStatus.NONFINITE,
-                AnalysisStatus.TOO_SHORT, AnalysisStatus.UNREADABLE)
 
 
 class ResponseService:

@@ -430,9 +430,15 @@ class CompareWorkbench(QDialog):
         self.waveform.show_envelopes(env_a, env_b)
         self.waveform.mark_onset_peak(env_a, COLOR_IR_A, 'A')
         self.waveform.mark_onset_peak(env_b, COLOR_IR_B, 'B')
+        bands_a = getattr(self.rec_a, 'band_levels', None) if self.rec_a else None
+        bands_b = getattr(self.rec_b, 'band_levels', None) if self.rec_b else None
         self.summary.show_fingerprints(
             self._last_fp_a, self._last_fp_b,
-            'A', 'B')
+            'A', 'B',
+            bands_a=bands_a,
+            bands_b=bands_b,
+            pair_res=pair,
+            blend_res=blend)
         self.phase_blend.show_pair(result.get('phase_a'),
                                    result.get('phase_b'), pair)
         self.phase_blend.show_blend(pair, blend)

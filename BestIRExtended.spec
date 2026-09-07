@@ -10,7 +10,7 @@ a = Analysis(
     datas=[('app/assets/bestir.ico', 'app/assets'),
            ('app/assets/bestir_icon.png', 'app/assets')],
     hiddenimports=['sounddevice', 'soundfile', 'app.extensions',
-                   'app.extensions.ui'],
+                   'app.extensions.ui', 'app.extensions.musician_summary'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

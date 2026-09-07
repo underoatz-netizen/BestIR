@@ -397,6 +397,7 @@ def test_remove_folder_button_updates_library_and_folders_list(extended, qapp):
     assert extended.remove_folder_btn.isVisibleTo(panel)
 
     folder_list = panel.folder_list
+    folder_list.clear()
     folder_list.addItem('C:/test/ir_folder_1')
     folder_list.addItem('C:/test/ir_folder_2')
     assert folder_list.count() == 2

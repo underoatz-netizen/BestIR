@@ -9,10 +9,11 @@ value sounds better.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QScrollArea, QSplitter, QTableWidget,
                                QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
+from ..musician_summary import Language, SummarySnapshot, describe_pair, make_snapshot_from_fingerprints
 from .metric_format import (format_cell, format_number, to_display_value,
                             unit_suffix)
 from .styles_boro import (ACCENT_GOLD, BORDER_CARD, COLOR_IR_A, COLOR_IR_B,
@@ -145,9 +146,33 @@ class SummaryPanel(QWidget):
         wc_lay = QVBoxLayout(why_container)
         wc_lay.setContentsMargins(0, 0, 0, 0)
         wc_lay.setSpacing(4)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+
         wc_lbl = QLabel('Acoustic Differences Breakdown:')
         wc_lbl.setStyleSheet(f"color: {ACCENT_GOLD}; font-weight: 600; font-size: 8.5pt;")
-        wc_lay.addWidget(wc_lbl)
+        header_row.addWidget(wc_lbl, 1)
+
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItem('ไทย', Language.TH)
+        self.lang_combo.addItem('English', Language.EN)
+        self.lang_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {SURFACE_RAISED};
+                color: {TEXT_MAIN};
+                border: 1px solid {BORDER_CARD};
+                border-radius: 4px;
+                padding: 1px 6px;
+                font-size: 8pt;
+                font-family: {FONT_FAMILY_PRIMARY};
+            }}
+        """)
+        self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        header_row.addWidget(self.lang_combo, 0)
+
+        wc_lay.addLayout(header_row)
 
         self.why = QTextEdit()
         self.why.setReadOnly(True)
@@ -170,10 +195,46 @@ class SummaryPanel(QWidget):
         wc_lay.addWidget(self.why, 1)
         splitter.addWidget(why_container)
 
+        self._last_snapshot: SummarySnapshot | None = None
+        self._current_lang: Language = Language.TH
+        self._last_tech_lines: list[str] = []
+
         splitter.setSizes([500, 400])
         layout.addWidget(splitter, 1)
 
-    def show_fingerprints(self, fp_a, fp_b, name_a='A', name_b='B'):
+    def _on_lang_changed(self, idx: int):
+        self._current_lang = self.lang_combo.currentData() or Language.TH
+        self._render_summary()
+
+    def _render_summary(self):
+        if self._last_snapshot is None:
+            self.why.clear()
+            return
+        summary = describe_pair(
+            None, None,
+            lang=self._current_lang,
+            snapshot=self._last_snapshot,
+        )
+        sections = []
+        if self._last_tech_lines:
+            header = 'จุดต่างที่ควรลองฟัง (A/B)' if self._current_lang == Language.TH else 'Key Audition Differences (A/B)'
+            sections.append(f"{header}\n\n" + "\n".join(self._last_tech_lines))
+        sections.append(summary.formatted_text())
+        self.why.setPlainText("\n\n---\n\n".join(sections))
+
+    def show_fingerprints(self, fp_a, fp_b, name_a='A', name_b='B',
+                          bands_a=None, bands_b=None, pair_res=None, blend_res=None):
+        self._last_snapshot = make_snapshot_from_fingerprints(
+            fp_a=fp_a,
+            fp_b=fp_b,
+            name_a=name_a,
+            name_b=name_b,
+            bands_a=bands_a,
+            bands_b=bands_b,
+            pair_res=pair_res,
+            blend_res=blend_res,
+        )
+
         # Update Metric Cards
         for feat, card in self._cards.items():
             fa = fp_a.all_features().get(feat) if fp_a else None
@@ -231,27 +292,16 @@ class SummaryPanel(QWidget):
             if nb:
                 self.table.item(i, 2).setToolTip(f'B: {nb}')
 
-        # Compact, musician-oriented summary.  The table above remains the
-        # technical evidence; these lines deliberately use A/B, not filenames.
+        # Technical differences (ranked by normalized effect)
         diffs.sort(reverse=True)
-        lines = []
+        tech_lines = []
         for effect, feat, label, d, _da, _db, _unit in diffs:
-            # Ignore deltas below the feature's own reporting scale.  A/B need
-            # not be described as different merely because they are different files.
             if effect < 0.15:
                 continue
             phrase = _musician_difference(feat, label, d)
-            if phrase and phrase not in lines:
-                lines.append(phrase)
-            if len(lines) == 3:
+            if phrase and phrase not in tech_lines:
+                tech_lines.append(phrase)
+            if len(tech_lines) == 3:
                 break
-        body = '\n'.join(lines)
-        if body:
-            self.why.setPlainText(
-                'จุดต่างที่ควรลองฟัง (A/B)\n\n' + body +
-                '\n\nลองสลับ A/B ด้วย DI เดียวกันและ level match; '
-                'ดูตารางด้านซ้ายสำหรับค่าที่วัด')
-        else:
-            self.why.setPlainText(
-                'A และ B ใกล้เคียงกันจากค่าที่วัด; ลองสลับฟังด้วย DI เดียวกัน '
-                'และ level match เพื่อเลือก character ที่ชอบ')
+        self._last_tech_lines = tech_lines
+        self._render_summary()
